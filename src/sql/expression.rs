@@ -77,6 +77,7 @@ impl dbs::Process for Expression {
 					Operator::Mul => fnc::operate::mul(&l, &r),
 					Operator::Div => fnc::operate::div(&l, &r),
 					Operator::Equal => fnc::operate::equal(&l, &r),
+					Operator::Exact => fnc::operate::exact(&l, &r),
 					Operator::NotEqual => fnc::operate::not_equal(&l, &r),
 					Operator::AllEqual => fnc::operate::all_equal(&l, &r),
 					Operator::AnyEqual => fnc::operate::any_equal(&l, &r),
@@ -110,7 +111,7 @@ pub fn expression(i: &str) -> IResult<&str, Expression> {
 	alt((binary, single))(i)
 }
 
-fn binary(i: &str) -> IResult<&str, Expression> {
+pub fn binary(i: &str) -> IResult<&str, Expression> {
 	let (i, l) = literal(i)?;
 	let (i, _) = mightbespace(i)?;
 	let (i, o) = operator(i)?;
@@ -119,7 +120,7 @@ fn binary(i: &str) -> IResult<&str, Expression> {
 	Ok((i, Expression::Binary(Box::new(l), o, Box::new(r))))
 }
 
-fn single(i: &str) -> IResult<&str, Expression> {
+pub fn single(i: &str) -> IResult<&str, Expression> {
 	let (i, l) = literal(i)?;
 	Ok((i, Expression::Single(Box::new(l))))
 }

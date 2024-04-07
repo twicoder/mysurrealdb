@@ -19,6 +19,7 @@ pub enum Operator {
 	Dec, // -=
 	//
 	Equal,    // =
+	Exact,    // ==
 	NotEqual, // !=
 	AllEqual, // *=
 	AnyEqual, // ?=
@@ -64,6 +65,7 @@ impl fmt::Display for Operator {
 			Operator::Inc => write!(f, "+="),
 			Operator::Dec => write!(f, "-="),
 			Operator::Equal => write!(f, "="),
+			Operator::Exact => write!(f, "=="),
 			Operator::NotEqual => write!(f, "!="),
 			Operator::AllEqual => write!(f, "*="),
 			Operator::AnyEqual => write!(f, "?="),
@@ -76,15 +78,15 @@ impl fmt::Display for Operator {
 			Operator::MoreThan => write!(f, ">"),
 			Operator::MoreThanOrEqual => write!(f, ">="),
 			Operator::Contain => write!(f, "CONTAINS"),
-			Operator::NotContain => write!(f, "∌"),
-			Operator::ContainAll => write!(f, "⊇"),
-			Operator::ContainSome => write!(f, "⊃"),
-			Operator::ContainNone => write!(f, "⊅"),
+			Operator::NotContain => write!(f, "CONTAINS NOT"),
+			Operator::ContainAll => write!(f, "CONTAINS ALL"),
+			Operator::ContainSome => write!(f, "CONTAINS SOME"),
+			Operator::ContainNone => write!(f, "CONTAINS NONE"),
 			Operator::Inside => write!(f, "INSIDE"),
-			Operator::NotInside => write!(f, "∉"),
-			Operator::AllInside => write!(f, "⊆"),
-			Operator::SomeInside => write!(f, "⊂"),
-			Operator::NoneInside => write!(f, "⊄"),
+			Operator::NotInside => write!(f, "NOT INSIDE"),
+			Operator::AllInside => write!(f, "ALL INSIDE"),
+			Operator::SomeInside => write!(f, "SOME INSIDE"),
+			Operator::NoneInside => write!(f, "NONE INSIDE"),
 			Operator::Intersects => write!(f, "INTERSECTS"),
 		}
 	}
@@ -101,6 +103,25 @@ pub fn assigner(i: &str) -> IResult<&str, Operator> {
 pub fn operator(i: &str) -> IResult<&str, Operator> {
 	alt((
 		alt((
+			map(tag("=="), |_| Operator::Exact),
+			map(tag("!="), |_| Operator::NotEqual),
+			map(tag("*="), |_| Operator::AllEqual),
+			map(tag("?="), |_| Operator::AnyEqual),
+			map(tag("="), |_| Operator::Equal),
+		)),
+		alt((
+			map(tag("!~"), |_| Operator::NotLike),
+			map(tag("*~"), |_| Operator::AllLike),
+			map(tag("?~"), |_| Operator::AnyLike),
+			map(tag("~"), |_| Operator::Like),
+		)),
+		alt((
+			map(tag("<="), |_| Operator::LessThanOrEqual),
+			map(tag("<"), |_| Operator::LessThan),
+			map(tag(">="), |_| Operator::MoreThanOrEqual),
+			map(tag(">"), |_| Operator::MoreThan),
+		)),
+		alt((
 			map(tag("+"), |_| Operator::Add),
 			map(tag("-"), |_| Operator::Sub),
 			map(tag("*"), |_| Operator::Mul),
@@ -108,24 +129,6 @@ pub fn operator(i: &str) -> IResult<&str, Operator> {
 			map(tag("∙"), |_| Operator::Mul),
 			map(tag("/"), |_| Operator::Div),
 			map(tag("÷"), |_| Operator::Div),
-		)),
-		alt((
-			map(tag("="), |_| Operator::Equal),
-			map(tag("!="), |_| Operator::NotEqual),
-			map(tag("*="), |_| Operator::AllEqual),
-			map(tag("?="), |_| Operator::AnyEqual),
-		)),
-		alt((
-			map(tag("~"), |_| Operator::Like),
-			map(tag("!~"), |_| Operator::NotLike),
-			map(tag("*~"), |_| Operator::AllLike),
-			map(tag("?~"), |_| Operator::AnyLike),
-		)),
-		alt((
-			map(tag("<="), |_| Operator::LessThanOrEqual),
-			map(tag("<"), |_| Operator::LessThan),
-			map(tag(">="), |_| Operator::MoreThanOrEqual),
-			map(tag(">"), |_| Operator::MoreThan),
 		)),
 		alt((
 			map(tag("∋"), |_| Operator::Contain),
@@ -138,8 +141,6 @@ pub fn operator(i: &str) -> IResult<&str, Operator> {
 			map(tag("⊆"), |_| Operator::AllInside),
 			map(tag("⊂"), |_| Operator::SomeInside),
 			map(tag("⊄"), |_| Operator::NoneInside),
-			map(tag("<•>"), |_| Operator::Inside),
-			map(tag("<|>"), |_| Operator::Intersects),
 		)),
 		alt((
 			map(tag_no_case("&&"), |_| Operator::And),

@@ -42,6 +42,10 @@ pub fn div(a: &Literal, b: &Literal) -> Result<Literal, Error> {
 	Ok(Literal::from(a / b))
 }
 
+pub fn exact(a: &Literal, b: &Literal) -> Result<Literal, Error> {
+	Ok(Literal::from(a == b))
+}
+
 pub fn equal(a: &Literal, b: &Literal) -> Result<Literal, Error> {
 	match a {
 		Literal::None => Ok(Literal::from(b.is_none() == true)),
@@ -233,8 +237,17 @@ pub fn more_than_or_equal(a: &Literal, b: &Literal) -> Result<Literal, Error> {
 
 pub fn contain(a: &Literal, b: &Literal) -> Result<Literal, Error> {
 	match a {
-		Literal::Array(v) => todo!(),
-		Literal::Strand(v) => todo!(),
+		Literal::Array(v) => match v.value.iter().any(|x| match x {
+			Value::Literal(v) => equal(v, b).is_ok(),
+			_ => unreachable!(),
+		}) {
+			true => Ok(Literal::True),
+			false => Ok(Literal::False),
+		},
+		Literal::Strand(v) => match b {
+			Literal::Strand(w) => Ok(Literal::from(v.value.contains(w.value.as_str()) == true)),
+			_ => Ok(Literal::from(v.value.contains(&b.as_strand().value.as_str()) == true)),
+		},
 		Literal::Polygon(v) => todo!(),
 		_ => Ok(Literal::False),
 	}
@@ -242,8 +255,17 @@ pub fn contain(a: &Literal, b: &Literal) -> Result<Literal, Error> {
 
 pub fn not_contain(a: &Literal, b: &Literal) -> Result<Literal, Error> {
 	match a {
-		Literal::Array(v) => todo!(),
-		Literal::Strand(v) => todo!(),
+		Literal::Array(v) => match v.value.iter().any(|x| match x {
+			Value::Literal(v) => equal(v, b).is_ok(),
+			_ => unreachable!(),
+		}) {
+			true => Ok(Literal::False),
+			false => Ok(Literal::True),
+		},
+		Literal::Strand(v) => match b {
+			Literal::Strand(w) => Ok(Literal::from(v.value.contains(w.value.as_str()) == false)),
+			_ => Ok(Literal::from(v.value.contains(&b.as_strand().value.as_str()) == false)),
+		},
 		Literal::Polygon(v) => todo!(),
 		_ => Ok(Literal::False),
 	}
