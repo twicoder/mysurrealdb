@@ -386,6 +386,18 @@ impl From<Option<String>> for Value {
 	}
 }
 
+impl Into<Vec<u8>> for Value {
+	fn into(self) -> Vec<u8> {
+		bincode::serialize(&self).unwrap()
+	}
+}
+
+impl From<Vec<u8>> for Value {
+	fn from(v: Vec<u8>) -> Self {
+		bincode::deserialize::<Value>(&v).unwrap()
+	}
+}
+
 impl Value {
 	// -----------------------------------
 	// Initial record value
@@ -598,6 +610,10 @@ impl Value {
 			.map(|s| Part::from(s))
 			.collect::<Vec<Part>>()
 			.into()
+	}
+
+	pub fn to_vec(&self) -> Result<Vec<u8>, Error> {
+		bincode::serialize(&self).map_err(|e| e.into())
 	}
 
 	// -----------------------------------

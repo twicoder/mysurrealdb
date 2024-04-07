@@ -253,8 +253,110 @@ impl Geometry {
 impl fmt::Display for Geometry {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		match self {
-			Geometry::Point(v) => write!(f, "({}, {})", v.x(), v.y()),
-			_ => write!(f, "{}", serde_json::to_string(self).unwrap_or(String::from(""))),
+			Geometry::Point(v) => {
+				write!(f, "{{ type: 'Point', coordinates: [{}, {}] }}", v.x(), v.y())
+			}
+			Geometry::Line(v) => write!(
+				f,
+				"{{ type: 'LineString', coordinates: [{}] }}",
+				v.points_iter()
+					.map(|ref v| format!("[{}, {}]", v.x(), v.y()))
+					.collect::<Vec<_>>()
+					.join(", ")
+			),
+			Geometry::Polygon(v) => write!(
+				f,
+				"{{ type: 'Polygon', coordinates: [[{}]{}] }}",
+				v.exterior()
+					.points_iter()
+					.map(|ref v| format!("[{}, {}]", v.x(), v.y()))
+					.collect::<Vec<_>>()
+					.join(", "),
+				match v.interiors().len() {
+					0 => format!(""),
+					_ => format!(
+						", [{}]",
+						v.interiors()
+							.iter()
+							.map(|i| {
+								format!(
+									"[{}]",
+									i.points_iter()
+										.map(|ref v| format!("[{}, {}]", v.x(), v.y()))
+										.collect::<Vec<_>>()
+										.join(", ")
+								)
+							})
+							.collect::<Vec<_>>()
+							.join(", "),
+					),
+				}
+			),
+			Geometry::MultiPoint(v) => {
+				write!(
+					f,
+					"{{ type: 'MultiPoint', coordinates: [{}] }}",
+					v.iter()
+						.map(|v| format!("[{}, {}]", v.x(), v.y()))
+						.collect::<Vec<_>>()
+						.join(", ")
+				)
+			}
+			Geometry::MultiLine(v) => write!(
+				f,
+				"{{ type: 'MultiLineString', coordinates: [{}] }}",
+				v.iter()
+					.map(|v| format!(
+						"[{}]",
+						v.points_iter()
+							.map(|ref v| format!("[{}, {}]", v.x(), v.y()))
+							.collect::<Vec<_>>()
+							.join(", ")
+					))
+					.collect::<Vec<_>>()
+					.join(", ")
+			),
+			Geometry::MultiPolygon(v) => write!(
+				f,
+				"{{ type: 'MultiPolygon', coordinates: [{}] }}",
+				v.iter()
+					.map(|v| format!(
+						"[[{}]{}]",
+						v.exterior()
+							.points_iter()
+							.map(|ref v| format!("[{}, {}]", v.x(), v.y()))
+							.collect::<Vec<_>>()
+							.join(", "),
+						match v.interiors().len() {
+							0 => format!(""),
+							_ => format!(
+								", [{}]",
+								v.interiors()
+									.iter()
+									.map(|i| {
+										format!(
+											"[{}]",
+											i.points_iter()
+												.map(|ref v| format!("[{}, {}]", v.x(), v.y()))
+												.collect::<Vec<_>>()
+												.join(", ")
+										)
+									})
+									.collect::<Vec<_>>()
+									.join(", "),
+							),
+						}
+					))
+					.collect::<Vec<_>>()
+					.join(", "),
+			),
+			Geometry::Collection(v) => {
+				write!(
+					f,
+					"{{ type: 'GeometryCollection', geometries: [{}] }}",
+					v.iter().map(|v| format!("{}", v)).collect::<Vec<_>>().join(", ")
+				)
+			}
 		}
 	}
 }
@@ -342,7 +444,7 @@ impl Serialize for Geometry {
 					let mut map = s.serialize_map(Some(2))?;
 					map.serialize_key("type")?;
 					map.serialize_value("GeometryCollection")?;
-					map.serialize_key("coordinates")?;
+					map.serialize_key("geometries")?;
 					map.serialize_value(v)?;
 					map.end()
 				}
@@ -521,11 +623,11 @@ fn collection(i: &str) -> IResult<&str, Geometry> {
 		|i| {
 			let (i, _) = preceded(key_type, collection_type)(i)?;
 			let (i, _) = delimited(mightbespace, tag(","), mightbespace)(i)?;
-			let (i, v) = preceded(key_vals, collection_vals)(i)?;
+			let (i, v) = preceded(key_geom, collection_vals)(i)?;
 			Ok((i, v))
 		},
 		|i| {
-			let (i, v) = preceded(key_vals, collection_vals)(i)?;
+			let (i, v) = preceded(key_geom, collection_vals)(i)?;
 			let (i, _) = delimited(mightbespace, tag(","), mightbespace)(i)?;
 			let (i, _) = preceded(key_type, collection_type)(i)?;
 			Ok((i, v))
@@ -705,6 +807,18 @@ fn key_vals(i: &str) -> IResult<&str, &str> {
 		tag("coordinates"),
 		delimited(tag(SINGLE), tag("coordinates"), tag(SINGLE)),
 		delimited(tag(DOUBLE), tag("coordinates"), tag(DOUBLE)),
+	))(i)?;
+	let (i, _) = mightbespace(i)?;
+	let (i, _) = tag(":")(i)?;
+	let (i, _) = mightbespace(i)?;
+	Ok((i, v))
+}
+
+fn key_geom(i: &str) -> IResult<&str, &str> {
+	let (i, v) = alt((
+		tag("geometries"),
+		delimited(tag(SINGLE), tag("geometries"), tag(SINGLE)),
+		delimited(tag(DOUBLE), tag("geometries"), tag(DOUBLE)),
 	))(i)?;
 	let (i, _) = mightbespace(i)?;
 	let (i, _) = tag(":")(i)?;

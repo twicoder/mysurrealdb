@@ -3,7 +3,6 @@ use crate::dbs::Options;
 use crate::dbs::Runtime;
 use crate::err::Error;
 use crate::sql::idiom::Idiom;
-use crate::sql::object::Object;
 use crate::sql::part::Part;
 use crate::sql::value::Value;
 use async_recursion::async_recursion;
@@ -27,7 +26,7 @@ impl Value {
 					Part::Field(p) => match v.value.get_mut(&p.name) {
 						Some(v) if v.is_some() => v.set(ctx, opt, exe, &path.next(), val).await,
 						_ => {
-							let mut obj = Value::from(Object::default());
+							let mut obj = Value::base();
 							obj.set(ctx, opt, exe, &path.next(), val).await?;
 							v.insert(&p.name, obj);
 							Ok(())
@@ -67,12 +66,22 @@ impl Value {
 					}
 					_ => Ok(()),
 				},
+				// Current path part is empty
+				Value::Null => {
+					*self = Value::base();
+					self.set(ctx, opt, exe, path, val).await
+				}
+				// Current path part is empty
+				Value::None => {
+					*self = Value::base();
+					self.set(ctx, opt, exe, path, val).await
+				}
 				// Ignore everything else
 				_ => Ok(()),
 			},
 			// No more parts so set the value
 			None => {
-				*self = val.clone();
+				*self = val;
 				Ok(())
 			}
 		}
@@ -97,6 +106,26 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn set_empty() {
+		let (ctx, opt, exe) = mock();
+		let idi = Idiom::parse("test");
+		let mut val = Value::None;
+		let res = Value::parse("{ test: 999 }");
+		val.set(&ctx, &opt, &exe, &idi, Value::from(999)).await.unwrap();
+		assert_eq!(res, val);
+	}
+
+	#[tokio::test]
+	async fn set_blank() {
+		let (ctx, opt, exe) = mock();
+		let idi = Idiom::parse("test.something");
+		let mut val = Value::None;
+		let res = Value::parse("{ test: { something: 999 } }");
+		val.set(&ctx, &opt, &exe, &idi, Value::from(999)).await.unwrap();
+		assert_eq!(res, val);
+	}
+
+	#[tokio::test]
 	async fn set_reset() {
 		let (ctx, opt, exe) = mock();
 		let idi = Idiom::parse("test");
@@ -112,6 +141,16 @@ mod tests {
 		let idi = Idiom::parse("test.something");
 		let mut val = Value::parse("{ test: { other: null, something: 123 } }");
 		let res = Value::parse("{ test: { other: null, something: 999 } }");
+		val.set(&ctx, &opt, &exe, &idi, Value::from(999)).await.unwrap();
+		assert_eq!(res, val);
+	}
+
+	#[tokio::test]
+	async fn set_allow() {
+		let (ctx, opt, exe) = mock();
+		let idi = Idiom::parse("test.something.allow");
+		let mut val = Value::parse("{ test: { other: null } }");
+		let res = Value::parse("{ test: { other: null, something: { allow: 999 } } }");
 		val.set(&ctx, &opt, &exe, &idi, Value::from(999)).await.unwrap();
 		assert_eq!(res, val);
 	}
