@@ -60,7 +60,7 @@ impl Function {
 					let v = v.compute(ctx, opt, exe, doc).await?;
 					a.push(v);
 				}
-				fnc::run(ctx, s, a)
+				fnc::run(ctx, s, a).await
 			}
 		}
 	}
@@ -321,6 +321,7 @@ fn function_time(i: &str) -> IResult<&str, &str> {
 		tag("time::age"),
 		tag("time::day"),
 		tag("time::floor"),
+		tag("time::group"),
 		tag("time::hour"),
 		tag("time::mins"),
 		tag("time::month"),

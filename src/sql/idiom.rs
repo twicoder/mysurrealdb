@@ -32,6 +32,14 @@ pub struct Idiom {
 	pub parts: Vec<Part>,
 }
 
+impl From<String> for Idiom {
+	fn from(v: String) -> Self {
+		Idiom {
+			parts: vec![Part::from(v)],
+		}
+	}
+}
+
 impl From<Vec<Part>> for Idiom {
 	fn from(v: Vec<Part>) -> Self {
 		Idiom {
@@ -41,6 +49,11 @@ impl From<Vec<Part>> for Idiom {
 }
 
 impl Idiom {
+	pub fn add(&self, n: Part) -> Idiom {
+		let mut p = self.parts.to_vec();
+		p.push(n);
+		Idiom::from(p)
+	}
 	pub fn next(&self) -> Idiom {
 		match self.parts.len() {
 			0 => Idiom::from(vec![]),
@@ -59,7 +72,7 @@ impl Idiom {
 	) -> Result<Value, Error> {
 		match doc {
 			// There is a current document
-			Some(v) => v.get(ctx, opt, exe, self).await.ok(),
+			Some(v) => v.get(ctx, opt, exe, self).await,
 			// There isn't any document
 			None => Ok(Value::None),
 		}

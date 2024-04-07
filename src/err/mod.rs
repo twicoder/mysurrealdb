@@ -33,6 +33,9 @@ pub enum Error {
 	#[error("Specify some SQL code to execute")]
 	EmptyError,
 
+	#[error("The request body contains invalid data")]
+	RequestError,
+
 	#[error("The query failed to complete in time")]
 	TimeoutError,
 
@@ -44,6 +47,11 @@ pub enum Error {
 		line: usize,
 		char: usize,
 		sql: String,
+	},
+
+	#[error("The JSON Patch contains invalid operations. {message}")]
+	PatchError {
+		message: String,
 	},
 
 	#[error("Problem with embedded script function. {message}")]
