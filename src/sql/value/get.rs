@@ -8,6 +8,7 @@ use crate::sql::part::Part;
 use crate::sql::statements::select::SelectStatement;
 use crate::sql::value::{Value, Values};
 use async_recursion::async_recursion;
+use futures::future::try_join_all;
 
 impl Value {
 	#[async_recursion]
@@ -32,11 +33,9 @@ impl Value {
 				// Current path part is an array
 				Value::Array(v) => match p {
 					Part::All => {
-						let mut a = Vec::new();
-						for v in &v.value {
-							a.push(v.get(ctx, opt, exe, &path.next()).await?)
-						}
-						Ok(a.into())
+						let pth = path.next();
+						let fut = v.value.iter().map(|v| v.get(&ctx, opt, exe, &pth));
+						try_join_all(fut).await.map(|v| v.into())
 					}
 					Part::First => match v.value.first() {
 						Some(v) => v.get(ctx, opt, exe, &path.next()).await,
@@ -51,10 +50,11 @@ impl Value {
 						None => Ok(Value::None),
 					},
 					Part::Where(w) => {
+						let pth = path.next();
 						let mut a = Vec::new();
 						for v in &v.value {
 							if w.compute(ctx, opt, exe, Some(&v)).await?.is_truthy() {
-								a.push(v.get(ctx, opt, exe, &path.next()).await?)
+								a.push(v.get(ctx, opt, exe, &pth).await?)
 							}
 						}
 						Ok(a.into())
@@ -64,7 +64,7 @@ impl Value {
 				// Current path part is a thing
 				Value::Thing(v) => match path.parts.len() {
 					// No remote embedded fields, so just return this
-					1 => Ok(Value::Thing(v.clone())),
+					0 => Ok(Value::Thing(v.clone())),
 					// Remote embedded field, so fetch the thing
 					_ => {
 						let stm = SelectStatement {
@@ -72,10 +72,12 @@ impl Value {
 							what: Values(vec![Value::Thing(v.clone())]),
 							..SelectStatement::default()
 						};
-						match stm.compute(ctx, opt, exe, None).await {
-							Ok(v) => v.get(ctx, opt, exe, &path.next()).await,
-							Err(_) => Ok(Value::None),
-						}
+						stm.compute(ctx, opt, exe, None)
+							.await?
+							.first(ctx, opt, exe)
+							.await?
+							.get(ctx, opt, exe, &path)
+							.await
 					}
 				},
 				// Ignore everything else
@@ -97,28 +99,28 @@ mod tests {
 
 	#[tokio::test]
 	async fn get_none() {
-		let (ctx, opt, mut exe) = mock();
+		let (ctx, opt, exe) = mock();
 		let idi = Idiom::default();
 		let val = Value::parse("{ test: { other: null, something: 123 } }");
-		let res = val.get(&ctx, &opt, &mut exe, &idi).await.unwrap();
+		let res = val.get(&ctx, &opt, &exe, &idi).await.unwrap();
 		assert_eq!(res, val);
 	}
 
 	#[tokio::test]
 	async fn get_basic() {
-		let (ctx, opt, mut exe) = mock();
+		let (ctx, opt, exe) = mock();
 		let idi = Idiom::parse("test.something");
 		let val = Value::parse("{ test: { other: null, something: 123 } }");
-		let res = val.get(&ctx, &opt, &mut exe, &idi).await.unwrap();
+		let res = val.get(&ctx, &opt, &exe, &idi).await.unwrap();
 		assert_eq!(res, Value::from(123));
 	}
 
 	#[tokio::test]
 	async fn get_thing() {
-		let (ctx, opt, mut exe) = mock();
+		let (ctx, opt, exe) = mock();
 		let idi = Idiom::parse("test.other");
 		let val = Value::parse("{ test: { other: test:tobie, something: 123 } }");
-		let res = val.get(&ctx, &opt, &mut exe, &idi).await.unwrap();
+		let res = val.get(&ctx, &opt, &exe, &idi).await.unwrap();
 		assert_eq!(
 			res,
 			Value::from(Thing {
@@ -130,19 +132,19 @@ mod tests {
 
 	#[tokio::test]
 	async fn get_array() {
-		let (ctx, opt, mut exe) = mock();
+		let (ctx, opt, exe) = mock();
 		let idi = Idiom::parse("test.something[1]");
 		let val = Value::parse("{ test: { something: [123, 456, 789] } }");
-		let res = val.get(&ctx, &opt, &mut exe, &idi).await.unwrap();
+		let res = val.get(&ctx, &opt, &exe, &idi).await.unwrap();
 		assert_eq!(res, Value::from(456));
 	}
 
 	#[tokio::test]
 	async fn get_array_thing() {
-		let (ctx, opt, mut exe) = mock();
+		let (ctx, opt, exe) = mock();
 		let idi = Idiom::parse("test.something[1]");
 		let val = Value::parse("{ test: { something: [test:tobie, test:jaime] } }");
-		let res = val.get(&ctx, &opt, &mut exe, &idi).await.unwrap();
+		let res = val.get(&ctx, &opt, &exe, &idi).await.unwrap();
 		assert_eq!(
 			res,
 			Value::from(Thing {
@@ -154,37 +156,37 @@ mod tests {
 
 	#[tokio::test]
 	async fn get_array_field() {
-		let (ctx, opt, mut exe) = mock();
+		let (ctx, opt, exe) = mock();
 		let idi = Idiom::parse("test.something[1].age");
 		let val = Value::parse("{ test: { something: [{ age: 34 }, { age: 36 }] } }");
-		let res = val.get(&ctx, &opt, &mut exe, &idi).await.unwrap();
+		let res = val.get(&ctx, &opt, &exe, &idi).await.unwrap();
 		assert_eq!(res, Value::from(36));
 	}
 
 	#[tokio::test]
 	async fn get_array_fields() {
-		let (ctx, opt, mut exe) = mock();
+		let (ctx, opt, exe) = mock();
 		let idi = Idiom::parse("test.something[*].age");
 		let val = Value::parse("{ test: { something: [{ age: 34 }, { age: 36 }] } }");
-		let res = val.get(&ctx, &opt, &mut exe, &idi).await.unwrap();
+		let res = val.get(&ctx, &opt, &exe, &idi).await.unwrap();
 		assert_eq!(res, Value::from(vec![34, 36]));
 	}
 
 	#[tokio::test]
 	async fn get_array_where_field() {
-		let (ctx, opt, mut exe) = mock();
+		let (ctx, opt, exe) = mock();
 		let idi = Idiom::parse("test.something[WHERE age > 35].age");
 		let val = Value::parse("{ test: { something: [{ age: 34 }, { age: 36 }] } }");
-		let res = val.get(&ctx, &opt, &mut exe, &idi).await.unwrap();
+		let res = val.get(&ctx, &opt, &exe, &idi).await.unwrap();
 		assert_eq!(res, Value::from(vec![36]));
 	}
 
 	#[tokio::test]
 	async fn get_array_where_fields() {
-		let (ctx, opt, mut exe) = mock();
+		let (ctx, opt, exe) = mock();
 		let idi = Idiom::parse("test.something[WHERE age > 35]");
 		let val = Value::parse("{ test: { something: [{ age: 34 }, { age: 36 }] } }");
-		let res = val.get(&ctx, &opt, &mut exe, &idi).await.unwrap();
+		let res = val.get(&ctx, &opt, &exe, &idi).await.unwrap();
 		assert_eq!(
 			res,
 			Value::from(vec![Value::from(map! {

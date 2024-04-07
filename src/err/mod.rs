@@ -4,6 +4,7 @@ use crate::sql::thing::Thing;
 use crate::sql::value::Value;
 use echodb::err::Error as EchoDBError;
 use http::Error as HttpError;
+use hyper::Error as HyperError;
 use serde_cbor::error::Error as CborError;
 use serde_json::error::Error as JsonError;
 use std::time::Duration;
@@ -69,6 +70,9 @@ pub enum Error {
 	QueryTimeoutError {
 		timer: Duration,
 	},
+
+	#[error("Query not executed due to cancelled transaction")]
+	QueryCancelledError,
 
 	#[error("Query not executed due to failed transaction")]
 	QueryExecutionError,
@@ -149,6 +153,9 @@ pub enum Error {
 
 	#[error("Datastore error: {0}")]
 	TiKVError(#[from] TiKVError),
+
+	#[error("HTTP Error: {0}")]
+	HyperError(#[from] HyperError),
 
 	#[error("HTTP Error: {0}")]
 	HttpError(#[from] HttpError),

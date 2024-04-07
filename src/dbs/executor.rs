@@ -1,5 +1,5 @@
 use crate::ctx::Context;
-use crate::dbs::response::{Response, Responses};
+use crate::dbs::response::{Response, Responses, Status};
 use crate::dbs::Auth;
 use crate::dbs::Level;
 use crate::dbs::Options;
@@ -13,8 +13,6 @@ use crate::sql::value::Value;
 use futures::lock::Mutex;
 use std::sync::Arc;
 use std::time::Instant;
-
-const NAME: &'static str = "surreal::exe";
 
 #[derive(Default)]
 pub struct Executor<'a> {
@@ -46,10 +44,6 @@ impl<'a> Executor<'a> {
 			return Err(Error::DbError);
 		}
 		Ok(())
-	}
-
-	pub fn export(&mut self, ctx: Runtime) -> Result<String, Error> {
-		todo!()
 	}
 
 	async fn begin(&mut self) -> bool {
@@ -107,7 +101,35 @@ impl<'a> Executor<'a> {
 		}
 	}
 
+	fn buf_cancel(&self, v: Response) -> Response {
+		Response {
+			sql: v.sql,
+			time: v.time,
+			status: Status::Err,
+			detail: Some(format!("{}", Error::QueryCancelledError)),
+			result: None,
+		}
+	}
+
+	fn buf_commit(&self, v: Response) -> Response {
+		match &self.err {
+			Some(_) => Response {
+				sql: v.sql,
+				time: v.time,
+				status: Status::Err,
+				detail: match v.status {
+					Status::Ok => Some(format!("{}", Error::QueryExecutionError)),
+					Status::Err => v.detail,
+				},
+				result: None,
+			},
+			_ => v,
+		}
+	}
+
 	pub async fn execute(&mut self, mut ctx: Runtime, qry: Query) -> Result<Responses, Error> {
+		// Initialise buffer of responses
+		let mut buf: Vec<Response> = vec![];
 		// Initialise array of responses
 		let mut out: Vec<Response> = vec![];
 		// Create a new options
@@ -126,11 +148,12 @@ impl<'a> Executor<'a> {
 			let res = match stm {
 				// Specify runtime options
 				Statement::Option(stm) => {
-					match &stm.name.name[..] {
+					match &stm.name.name.to_uppercase()[..] {
 						"FIELD_QUERIES" => opt = opt.fields(stm.what),
 						"EVENT_QUERIES" => opt = opt.events(stm.what),
 						"TABLE_QUERIES" => opt = opt.tables(stm.what),
 						"IMPORT" => opt = opt.import(stm.what),
+						"DEBUG" => opt = opt.debug(stm.what),
 						_ => break,
 					}
 					continue;
@@ -138,20 +161,30 @@ impl<'a> Executor<'a> {
 				// Begin a new transaction
 				Statement::Begin(stm) => {
 					let res = stm.compute(&ctx, &opt, self, None).await;
-					self.err = res.err();
+					if res.is_err() {
+						self.err = res.err()
+					};
 					continue;
 				}
 				// Cancel a running transaction
 				Statement::Cancel(stm) => {
 					let res = stm.compute(&ctx, &opt, self, None).await;
-					self.err = res.err();
+					if res.is_err() {
+						self.err = res.err()
+					};
+					buf = buf.into_iter().map(|v| self.buf_cancel(v)).collect();
+					out.append(&mut buf);
 					self.txn = None;
 					continue;
 				}
 				// Commit a running transaction
 				Statement::Commit(stm) => {
 					let res = stm.compute(&ctx, &opt, self, None).await;
-					self.err = res.err();
+					if res.is_err() {
+						self.err = res.err()
+					};
+					buf = buf.into_iter().map(|v| self.buf_commit(v)).collect();
+					out.append(&mut buf);
 					self.txn = None;
 					continue;
 				}
@@ -210,25 +243,46 @@ impl<'a> Executor<'a> {
 			};
 			// Get the statement end time
 			let dur = now.elapsed();
-			// Buffer the returned result
-			match res {
-				Ok(v) => out.push(Response {
+			// Produce the response
+			let res = match res {
+				Ok(v) => Response {
+					sql: match opt.debug {
+						true => Some(format!("{}", stm)),
+						false => None,
+					},
 					time: format!("{:?}", dur),
-					status: String::from("OK"),
+					status: Status::Ok,
 					detail: None,
 					result: v.output(),
-				}),
+				},
 				Err(e) => {
-					// Output the error
-					out.push(Response {
+					// Produce the response
+					let res = Response {
+						sql: match opt.debug {
+							true => Some(format!("{}", stm)),
+							false => None,
+						},
 						time: format!("{:?}", dur),
-						status: String::from("ERR"),
+						status: Status::Err,
 						detail: Some(format!("{}", e)),
 						result: None,
-					});
+					};
 					// Keep the error
 					self.err = Some(e);
+					// Return
+					res
 				}
+			};
+			// Output the response
+			match self.txn {
+				Some(_) => match stm {
+					Statement::Output(_) => {
+						buf.clear();
+						buf.push(res);
+					}
+					_ => buf.push(res),
+				},
+				None => out.push(res),
 			}
 		}
 		// Return responses
