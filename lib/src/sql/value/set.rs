@@ -2,7 +2,7 @@ use crate::dbs::Options;
 use crate::dbs::Runtime;
 use crate::dbs::Transaction;
 use crate::err::Error;
-use crate::sql::idiom::Idiom;
+use crate::sql::part::Next;
 use crate::sql::part::Part;
 use crate::sql::value::Value;
 use async_recursion::async_recursion;
@@ -16,20 +16,20 @@ impl Value {
 		ctx: &Runtime,
 		opt: &Options,
 		txn: &Transaction,
-		path: &Idiom,
+		path: &[Part],
 		val: Value,
 	) -> Result<(), Error> {
-		match path.parts.first() {
+		match path.first() {
 			// Get the current path part
 			Some(p) => match self {
 				// Current path part is an object
 				Value::Object(v) => match p {
-					Part::Field(p) => match v.value.get_mut(&p.name) {
-						Some(v) if v.is_some() => v.set(ctx, opt, txn, &path.next(), val).await,
+					Part::Field(f) => match v.value.get_mut(&f.name) {
+						Some(v) if v.is_some() => v.set(ctx, opt, txn, path.next(), val).await,
 						_ => {
 							let mut obj = Value::base();
-							obj.set(ctx, opt, txn, &path.next(), val).await?;
-							v.insert(&p.name, obj);
+							obj.set(ctx, opt, txn, path.next(), val).await?;
+							v.insert(&f.name, obj);
 							Ok(())
 						}
 					},
@@ -38,34 +38,39 @@ impl Value {
 				// Current path part is an array
 				Value::Array(v) => match p {
 					Part::All => {
-						let pth = path.next();
-						let fut =
-							v.value.iter_mut().map(|v| v.set(ctx, opt, txn, &pth, val.clone()));
-						try_join_all(fut).await?;
+						let path = path.next();
+						let futs =
+							v.value.iter_mut().map(|v| v.set(ctx, opt, txn, path, val.clone()));
+						try_join_all(futs).await?;
 						Ok(())
 					}
 					Part::First => match v.value.first_mut() {
-						Some(v) => v.set(ctx, opt, txn, &path.next(), val).await,
+						Some(v) => v.set(ctx, opt, txn, path.next(), val).await,
 						None => Ok(()),
 					},
 					Part::Last => match v.value.last_mut() {
-						Some(v) => v.set(ctx, opt, txn, &path.next(), val).await,
+						Some(v) => v.set(ctx, opt, txn, path.next(), val).await,
 						None => Ok(()),
 					},
 					Part::Index(i) => match v.value.get_mut(i.to_usize()) {
-						Some(v) => v.set(ctx, opt, txn, &path.next(), val).await,
+						Some(v) => v.set(ctx, opt, txn, path.next(), val).await,
 						None => Ok(()),
 					},
 					Part::Where(w) => {
-						let pth = path.next();
+						let path = path.next();
 						for v in &mut v.value {
 							if w.compute(ctx, opt, txn, Some(&v)).await?.is_truthy() {
-								v.set(ctx, opt, txn, &pth, val.clone()).await?;
+								v.set(ctx, opt, txn, path, val.clone()).await?;
 							}
 						}
 						Ok(())
 					}
-					_ => Ok(()),
+					_ => {
+						let futs =
+							v.value.iter_mut().map(|v| v.set(ctx, opt, txn, path, val.clone()));
+						try_join_all(futs).await?;
+						Ok(())
+					}
 				},
 				// Current path part is empty
 				Value::Null => {
@@ -94,6 +99,7 @@ mod tests {
 
 	use super::*;
 	use crate::dbs::test::mock;
+	use crate::sql::idiom::Idiom;
 	use crate::sql::test::Parse;
 
 	#[tokio::test]
@@ -200,6 +206,16 @@ mod tests {
 	async fn set_array_fields() {
 		let (ctx, opt, txn) = mock().await;
 		let idi = Idiom::parse("test.something[*].age");
+		let mut val = Value::parse("{ test: { something: [{ age: 34 }, { age: 36 }] } }");
+		let res = Value::parse("{ test: { something: [{ age: 21 }, { age: 21 }] } }");
+		val.set(&ctx, &opt, &txn, &idi, Value::from(21)).await.unwrap();
+		assert_eq!(res, val);
+	}
+
+	#[tokio::test]
+	async fn set_array_fields_flat() {
+		let (ctx, opt, txn) = mock().await;
+		let idi = Idiom::parse("test.something.age");
 		let mut val = Value::parse("{ test: { something: [{ age: 34 }, { age: 36 }] } }");
 		let res = Value::parse("{ test: { something: [{ age: 21 }, { age: 21 }] } }");
 		val.set(&ctx, &opt, &txn, &idi, Value::from(21)).await.unwrap();

@@ -215,15 +215,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a32fd6af2b5827bce66c29053ba0e7c42b9dcab01835835058558c10851a46b"
 
 [[package]]
-name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "bindgen"
 version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -441,11 +432,12 @@ dependencies = [
 
 [[package]]
 name = "cipher"
-version = "0.3.0"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ee52072ec15386f770805afd189a01c8841be8696bed250fa2f13c4c0d6dfb7"
+checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
- "generic-array 0.14.7",
+ "crypto-common",
+ "inout",
 ]
 
 [[package]]
@@ -501,6 +493,16 @@ dependencies = [
  "is-terminal",
  "lazy_static",
  "winapi",
+]
+
+[[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1253,6 +1255,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "indxdb"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c89b87ab58cbdad0201008ce91890b38e09e18bcc546ee9cb3bf78c1c8dcd3bf"
+dependencies = [
+ "js-sys",
+ "rexie",
+ "thiserror",
+ "tokio",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "inout"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0c10553d664a4d0bcff9f4215d0aac67a639cc68ef660840afe309b807bc9f5"
+dependencies = [
+ "generic-array 0.14.7",
+]
+
+[[package]]
 name = "instant"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1475,46 +1499,23 @@ dependencies = [
 name = "mysurrealdb"
 version = "0.0.0"
 dependencies = [
- "anyhow",
- "argon2",
- "async-recursion",
- "bincode",
- "byteorder",
  "bytes",
  "chrono",
  "clap",
- "dmp",
- "echodb",
  "fern",
  "futures 0.3.30",
- "fuzzy-matcher",
- "geo",
  "http",
  "hyper",
  "log",
- "md-5",
- "nanoid",
- "nom 7.1.3",
  "once_cell",
- "pbkdf2",
- "rand 0.8.5",
- "regex",
  "reqwest",
  "rmp-serde",
- "rust_decimal",
- "scrypt",
  "serde",
  "serde_cbor",
  "serde_json",
- "sha-1",
- "sha2",
- "slug",
+ "surrealdb",
  "thiserror",
- "tikv-client",
  "tokio",
- "url",
- "utf-8",
- "uuid 0.8.2",
  "warp",
 ]
 
@@ -2211,6 +2212,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rexie"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8e6178d9a4aaae55ce07627003b9281dd02ffd0f489b4f80e1e242380492744"
+dependencies = [
+ "console_error_panic_hook",
+ "js-sys",
+ "num-traits",
+ "thiserror",
+ "tokio",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "rkyv"
 version = "0.7.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2352,9 +2368,9 @@ checksum = "ef703b7cb59335eae2eb93ceb664c0eb7ea6bf567079d843e09420219668e072"
 
 [[package]]
 name = "salsa20"
-version = "0.9.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c0fbb5f676da676c260ba276a8f43a8dc67cf02d1438423aeb1c677a7212686"
+checksum = "97a22f5af31f73a954c10289c93e8a50cc23d971e80ee446f1f6f7137a088213"
 dependencies = [
  "cipher",
 ]
@@ -2391,9 +2407,9 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scrypt"
-version = "0.8.1"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e73d6d7c6311ebdbd9184ad6c4447b2f36337e327bda107d3ba9e3c374f9d325"
+checksum = "ba0aaf3911fff0d942c10a49779de7754699810fc7dbe3df515613b2ecc8195a"
 dependencies = [
  "hmac",
  "password-hash",
@@ -2591,6 +2607,44 @@ name = "subtle"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6bdef32e8150c2a081110b42772ffe7d7c9032b606bc226c8260fd97e0976601"
+
+[[package]]
+name = "surrealdb"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "async-recursion",
+ "byteorder",
+ "chrono",
+ "dmp",
+ "echodb",
+ "futures 0.3.30",
+ "fuzzy-matcher",
+ "geo",
+ "indxdb",
+ "log",
+ "md-5",
+ "nanoid",
+ "nom 7.1.3",
+ "once_cell",
+ "pbkdf2",
+ "rand 0.8.5",
+ "regex",
+ "rmp-serde",
+ "rust_decimal",
+ "scrypt",
+ "serde",
+ "sha-1",
+ "sha2",
+ "slug",
+ "thiserror",
+ "tikv-client",
+ "tokio",
+ "trice",
+ "url",
+ "utf-8",
+ "uuid 0.8.2",
+]
 
 [[package]]
 name = "syn"
@@ -2827,6 +2881,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
+ "num_cpus",
  "pin-project-lite",
  "socket2",
  "tokio-macros",
@@ -2932,6 +2987,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c06d3da6113f116aaee68e4d601191614c9053067f9ab7f6edbcb161237daa54"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "trice"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27a3a110aba3d0ffc4dac3eedbce006dce1a3db5b484c94313940b999c9409ef"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
@@ -3131,6 +3197,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4be2531df63900aeb2bca0daaaddec08491ee64ceecbee5076636a3b026795a8"
 dependencies = [
  "cfg-if",
+ "serde",
+ "serde_json",
  "wasm-bindgen-macro",
 ]
 
