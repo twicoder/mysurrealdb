@@ -4,7 +4,6 @@ use crate::sql::comment::shouldbespace;
 use crate::sql::common::commas;
 use crate::sql::error::IResult;
 use crate::sql::idiom::{idiom, Idiom};
-use crate::sql::object::{object, Object};
 use crate::sql::operator::{assigner, Operator};
 use crate::sql::value::{value, Value};
 use nom::branch::alt;
@@ -18,9 +17,9 @@ pub enum Data {
 	EmptyExpression,
 	SetExpression(Vec<(Idiom, Operator, Value)>),
 	PatchExpression(Array),
-	MergeExpression(Object),
-	ReplaceExpression(Object),
-	ContentExpression(Object),
+	MergeExpression(Value),
+	ReplaceExpression(Value),
+	ContentExpression(Value),
 	SingleExpression(Value),
 	ValuesExpression(Vec<Vec<(Idiom, Value)>>),
 	UpdateExpression(Vec<(Idiom, Operator, Value)>),
@@ -106,21 +105,21 @@ fn patch(i: &str) -> IResult<&str, Data> {
 fn merge(i: &str) -> IResult<&str, Data> {
 	let (i, _) = tag_no_case("MERGE")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, v) = object(i)?;
+	let (i, v) = value(i)?;
 	Ok((i, Data::MergeExpression(v)))
 }
 
 fn replace(i: &str) -> IResult<&str, Data> {
 	let (i, _) = tag_no_case("REPLACE")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, v) = object(i)?;
+	let (i, v) = value(i)?;
 	Ok((i, Data::ReplaceExpression(v)))
 }
 
 fn content(i: &str) -> IResult<&str, Data> {
 	let (i, _) = tag_no_case("CONTENT")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, v) = object(i)?;
+	let (i, v) = value(i)?;
 	Ok((i, Data::ContentExpression(v)))
 }
 

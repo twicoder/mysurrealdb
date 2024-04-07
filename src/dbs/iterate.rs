@@ -1,7 +1,8 @@
-use crate::dbs::Executor;
+use crate::cnf::ID_CHARS;
 use crate::dbs::Iterator;
 use crate::dbs::Options;
 use crate::dbs::Runtime;
+use crate::dbs::Transaction;
 use crate::err::Error;
 use crate::sql::array::Array;
 use crate::sql::model::Model;
@@ -9,6 +10,7 @@ use crate::sql::table::Table;
 use crate::sql::thing::Thing;
 use crate::sql::value::Value;
 use async_recursion::async_recursion;
+use nanoid::nanoid;
 
 impl Value {
 	#[async_recursion]
@@ -16,15 +18,15 @@ impl Value {
 		self,
 		ctx: &Runtime,
 		opt: &Options,
-		exe: &Executor<'_>,
+		txn: &Transaction<'_>,
 		ite: &mut Iterator<'_>,
 	) -> Result<(), Error> {
 		match self {
-			Value::Array(v) => v.iterate(ctx, opt, exe, ite).await?,
-			Value::Model(v) => v.iterate(ctx, opt, exe, ite).await?,
-			Value::Thing(v) => v.iterate(ctx, opt, exe, ite).await?,
-			Value::Table(v) => v.iterate(ctx, opt, exe, ite).await?,
-			v => ite.process(ctx, opt, exe, None, v).await,
+			Value::Array(v) => v.iterate(ctx, opt, txn, ite).await?,
+			Value::Model(v) => v.iterate(ctx, opt, txn, ite).await?,
+			Value::Thing(v) => v.iterate(ctx, opt, txn, ite).await?,
+			Value::Table(v) => v.iterate(ctx, opt, txn, ite).await?,
+			v => ite.process(ctx, opt, txn, None, v).await,
 		}
 		Ok(())
 	}
@@ -36,16 +38,16 @@ impl Array {
 		self,
 		ctx: &Runtime,
 		opt: &Options,
-		exe: &Executor<'_>,
+		txn: &Transaction<'_>,
 		ite: &mut Iterator<'_>,
 	) -> Result<(), Error> {
 		for v in self.value.into_iter() {
 			match v {
-				Value::Array(v) => v.iterate(ctx, opt, exe, ite).await?,
-				Value::Model(v) => v.iterate(ctx, opt, exe, ite).await?,
-				Value::Thing(v) => v.iterate(ctx, opt, exe, ite).await?,
-				Value::Table(v) => v.iterate(ctx, opt, exe, ite).await?,
-				v => ite.process(ctx, opt, exe, None, v).await,
+				Value::Array(v) => v.iterate(ctx, opt, txn, ite).await?,
+				Value::Model(v) => v.iterate(ctx, opt, txn, ite).await?,
+				Value::Thing(v) => v.iterate(ctx, opt, txn, ite).await?,
+				Value::Table(v) => v.iterate(ctx, opt, txn, ite).await?,
+				v => ite.process(ctx, opt, txn, None, v).await,
 			}
 		}
 		Ok(())
@@ -57,7 +59,7 @@ impl Model {
 		self,
 		ctx: &Runtime,
 		opt: &Options,
-		exe: &Executor<'_>,
+		txn: &Transaction<'_>,
 		ite: &mut Iterator<'_>,
 	) -> Result<(), Error> {
 		if ctx.is_ok() {
@@ -65,9 +67,9 @@ impl Model {
 				for _ in 0..c {
 					Thing {
 						tb: self.table.to_string(),
-						id: xid::new().to_string(),
+						id: nanoid!(20, &ID_CHARS),
 					}
-					.iterate(ctx, opt, exe, ite)
+					.iterate(ctx, opt, txn, ite)
 					.await?;
 				}
 			}
@@ -77,7 +79,7 @@ impl Model {
 						tb: self.table.to_string(),
 						id: x.to_string(),
 					}
-					.iterate(ctx, opt, exe, ite)
+					.iterate(ctx, opt, txn, ite)
 					.await?;
 				}
 			}
@@ -91,10 +93,10 @@ impl Thing {
 		self,
 		ctx: &Runtime,
 		opt: &Options,
-		exe: &Executor<'_>,
+		txn: &Transaction<'_>,
 		ite: &mut Iterator<'_>,
 	) -> Result<(), Error> {
-		todo!()
+		Ok(())
 	}
 }
 
@@ -103,9 +105,9 @@ impl Table {
 		self,
 		ctx: &Runtime,
 		opt: &Options,
-		exe: &Executor<'_>,
+		txn: &Transaction<'_>,
 		ite: &mut Iterator<'_>,
 	) -> Result<(), Error> {
-		todo!()
+		Ok(())
 	}
 }

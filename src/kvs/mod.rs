@@ -11,12 +11,14 @@ use crate::err::Error;
 use once_cell::sync::OnceCell;
 
 pub enum Datastore {
+	Mock,
 	Mem(mem::Datastore),
 	File(file::Datastore),
 	TiKV(tikv::Datastore),
 }
 
 pub enum Transaction<'a> {
+	Mock,
 	Mem(mem::Transaction<'a>),
 	File(file::Transaction<'a>),
 	TiKV(tikv::Transaction),
@@ -24,9 +26,7 @@ pub enum Transaction<'a> {
 
 static DB: OnceCell<Datastore> = OnceCell::new();
 
-pub fn init(conf: &clap::ArgMatches) -> Result<(), Error> {
-	// Parse the database endpoint path
-	let path = conf.value_of("path").unwrap();
+pub fn init(path: &str) -> Result<(), Error> {
 	// Instantiate the database endpoint
 	match path {
 		"memory" => {
@@ -55,6 +55,10 @@ pub fn init(conf: &clap::ArgMatches) -> Result<(), Error> {
 
 pub async fn transaction<'a>(write: bool, lock: bool) -> Result<Transaction<'a>, Error> {
 	match DB.get().unwrap() {
+		Datastore::Mock => {
+			let tx = Transaction::Mock;
+			Ok(tx)
+		}
 		Datastore::Mem(v) => {
 			let tx = v.transaction(write, lock)?;
 			Ok(Transaction::Mem(tx))

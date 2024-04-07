@@ -1,9 +1,10 @@
+use crate::cnf::ID_CHARS;
 use crate::ctx::Canceller;
 use crate::ctx::Context;
-use crate::dbs::Executor;
 use crate::dbs::Options;
 use crate::dbs::Runtime;
 use crate::dbs::Statement;
+use crate::dbs::Transaction;
 use crate::doc::Document;
 use crate::err::Error;
 use crate::sql::group::Groups;
@@ -15,10 +16,10 @@ use crate::sql::table::Table;
 use crate::sql::thing::Thing;
 use crate::sql::value::Value;
 use crate::sql::version::Version;
+use nanoid::nanoid;
 use std::mem;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
-use xid;
 
 pub type Channel = UnboundedSender<Value>;
 
@@ -59,7 +60,7 @@ impl<'a> Iterator<'a> {
 	pub fn produce(&mut self, val: Table) {
 		self.prepare(Value::Thing(Thing {
 			tb: val.name.to_string(),
-			id: xid::new().to_string(),
+			id: nanoid!(20, &ID_CHARS),
 		}))
 	}
 
@@ -68,7 +69,7 @@ impl<'a> Iterator<'a> {
 		&mut self,
 		ctx: &Runtime,
 		opt: &Options,
-		exe: &Executor<'_>,
+		txn: &Transaction<'_>,
 	) -> Result<Value, Error> {
 		// Log the statement
 		trace!("Iterating {}", self.stmt);
@@ -77,55 +78,55 @@ impl<'a> Iterator<'a> {
 		self.run = ctx.add_cancel();
 		let ctx = ctx.freeze();
 		// Process prepared values
-		self.iterate(&ctx, opt, exe).await?;
+		self.iterate(&ctx, opt, txn).await?;
 		// Return any document errors
 		if let Some(e) = self.error.take() {
 			return Err(e);
 		}
 		// Process any SPLIT clause
-		self.output_split(&ctx, opt, exe);
+		self.output_split(&ctx, opt, txn);
 		// Process any GROUP clause
-		self.output_group(&ctx, opt, exe);
+		self.output_group(&ctx, opt, txn);
 		// Process any ORDER clause
-		self.output_order(&ctx, opt, exe);
+		self.output_order(&ctx, opt, txn);
 		// Process any START clause
-		self.output_start(&ctx, opt, exe);
+		self.output_start(&ctx, opt, txn);
 		// Process any LIMIT clause
-		self.output_limit(&ctx, opt, exe);
+		self.output_limit(&ctx, opt, txn);
 		// Output the results
 		Ok(mem::take(&mut self.results).into())
 	}
 
 	#[inline]
-	fn output_split(&mut self, ctx: &Runtime, opt: &Options, exe: &Executor) {
+	fn output_split(&mut self, ctx: &Runtime, opt: &Options, txn: &Transaction) {
 		if self.split.is_some() {
 			// Ignore
 		}
 	}
 
 	#[inline]
-	fn output_group(&mut self, ctx: &Runtime, opt: &Options, exe: &Executor) {
+	fn output_group(&mut self, ctx: &Runtime, opt: &Options, txn: &Transaction) {
 		if self.group.is_some() {
 			// Ignore
 		}
 	}
 
 	#[inline]
-	fn output_order(&mut self, ctx: &Runtime, opt: &Options, exe: &Executor) {
+	fn output_order(&mut self, ctx: &Runtime, opt: &Options, txn: &Transaction) {
 		if self.order.is_some() {
 			// Ignore
 		}
 	}
 
 	#[inline]
-	fn output_start(&mut self, ctx: &Runtime, opt: &Options, exe: &Executor) {
+	fn output_start(&mut self, ctx: &Runtime, opt: &Options, txn: &Transaction) {
 		if let Some(v) = self.start {
 			self.results = mem::take(&mut self.results).into_iter().skip(v.0).collect();
 		}
 	}
 
 	#[inline]
-	fn output_limit(&mut self, ctx: &Runtime, opt: &Options, exe: &Executor) {
+	fn output_limit(&mut self, ctx: &Runtime, opt: &Options, txn: &Transaction) {
 		if let Some(v) = self.limit {
 			self.results = mem::take(&mut self.results).into_iter().take(v.0).collect();
 		}
@@ -135,7 +136,7 @@ impl<'a> Iterator<'a> {
 		&mut self,
 		ctx: &Runtime,
 		opt: &Options,
-		exe: &Executor<'_>,
+		txn: &Transaction<'_>,
 	) -> Result<(), Error> {
 		match self.parallel {
 			// Run statements in parallel
@@ -148,7 +149,7 @@ impl<'a> Iterator<'a> {
 				}
 				// Process all processed values
 				while let Some(v) = rx.recv().await {
-					self.process(&ctx, opt, exe, None, v).await;
+					self.process(&ctx, opt, txn, k, v).await;
 				}
 				// Everything processed ok
 				Ok(())
@@ -157,7 +158,7 @@ impl<'a> Iterator<'a> {
 			false => {
 				// Process all prepared values
 				for v in mem::take(&mut self.readies) {
-					v.iterate(ctx, opt, exe, self).await?;
+					v.iterate(ctx, opt, txn, self).await?;
 				}
 				// Everything processed ok
 				Ok(())
@@ -169,7 +170,7 @@ impl<'a> Iterator<'a> {
 		&mut self,
 		ctx: &Runtime,
 		opt: &Options,
-		exe: &Executor<'_>,
+		txn: &Transaction<'_>,
 		thg: Option<Thing>,
 		val: Value,
 	) {
@@ -182,12 +183,12 @@ impl<'a> Iterator<'a> {
 
 		// Process the document
 		let res = match self.stmt {
-			Statement::Select(_) => doc.select(ctx, opt, exe, &self.stmt).await,
-			Statement::Create(_) => doc.create(ctx, opt, exe, &self.stmt).await,
-			Statement::Update(_) => doc.update(ctx, opt, exe, &self.stmt).await,
-			Statement::Relate(_) => doc.relate(ctx, opt, exe, &self.stmt).await,
-			Statement::Delete(_) => doc.delete(ctx, opt, exe, &self.stmt).await,
-			Statement::Insert(_) => doc.insert(ctx, opt, exe, &self.stmt).await,
+			Statement::Select(_) => doc.select(ctx, opt, txn, &self.stmt).await,
+			Statement::Create(_) => doc.create(ctx, opt, txn, &self.stmt).await,
+			Statement::Update(_) => doc.update(ctx, opt, txn, &self.stmt).await,
+			Statement::Relate(_) => doc.relate(ctx, opt, txn, &self.stmt).await,
+			Statement::Delete(_) => doc.delete(ctx, opt, txn, &self.stmt).await,
+			Statement::Insert(_) => doc.insert(ctx, opt, txn, &self.stmt).await,
 			_ => unreachable!(),
 		};
 

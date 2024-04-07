@@ -1,21 +1,25 @@
-use crate::dbs::Executor;
 use crate::dbs::Options;
 use crate::dbs::Runtime;
+use crate::dbs::Transaction;
 use crate::err::Error;
-use crate::sql::object::Object;
 use crate::sql::value::Value;
 
 impl Value {
 	pub async fn replace(
 		&mut self,
-		_ctx: &Runtime,
-		_opt: &Options,
-		_exe: &Executor<'_>,
-		val: &Object,
+		ctx: &Runtime,
+		opt: &Options,
+		txn: &Transaction<'_>,
+		val: &Value,
 	) -> Result<(), Error> {
 		// Clear all entries
-		*self = Value::from(val.clone());
-		Ok(())
+		match val.compute(ctx, opt, txn, Some(self)).await? {
+			Value::Object(v) => {
+				*self = Value::from(v);
+				Ok(())
+			}
+			_ => Ok(()),
+		}
 	}
 }
 
@@ -28,11 +32,11 @@ mod tests {
 
 	#[tokio::test]
 	async fn replace() {
-		let (ctx, opt, exe) = mock();
+		let (ctx, opt, txn) = mock().await;
 		let mut val = Value::parse("{ test: { other: null, something: 123 } }");
 		let res = Value::parse("{ other: true }");
-		let obj = Object::from(map! {String::from("other") => Value::from(true) });
-		val.replace(&ctx, &opt, &exe, &obj).await.unwrap();
+		let obj = Value::parse("{ other: true }");
+		val.replace(&ctx, &opt, &txn, &obj).await.unwrap();
 		assert_eq!(res, val);
 	}
 }
