@@ -2,7 +2,6 @@ use crate::dbs::Iterator;
 use crate::dbs::Level;
 use crate::dbs::Options;
 use crate::dbs::Runtime;
-use crate::dbs::Statement;
 use crate::dbs::Transaction;
 use crate::err::Error;
 use crate::sql::comment::shouldbespace;
@@ -28,23 +27,14 @@ use std::fmt;
 pub struct SelectStatement {
 	pub expr: Fields,
 	pub what: Values,
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub cond: Option<Cond>,
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub split: Option<Splits>,
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub group: Option<Groups>,
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub order: Option<Orders>,
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub limit: Option<Limit>,
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub start: Option<Start>,
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub fetch: Option<Fetchs>,
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub version: Option<Version>,
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<Timeout>,
 }
 
@@ -74,15 +64,7 @@ impl SelectStatement {
 		// Allowed to run?
 		opt.check(Level::No)?;
 		// Create a new iterator
-		let mut i = Iterator::new();
-		// Pass in current statement
-		i.stmt = Statement::from(self);
-		// Pass in statement config
-		i.split = self.split.as_ref();
-		i.group = self.group.as_ref();
-		i.order = self.order.as_ref();
-		i.limit = self.limit.as_ref();
-		i.start = self.start.as_ref();
+		let mut i = Iterator::from(self);
 		// Ensure futures are processed
 		let opt = &opt.futures(true);
 		// Loop over the select targets

@@ -2,7 +2,6 @@ use crate::dbs::Iterator;
 use crate::dbs::Level;
 use crate::dbs::Options;
 use crate::dbs::Runtime;
-use crate::dbs::Statement;
 use crate::dbs::Transaction;
 use crate::err::Error;
 use crate::sql::comment::shouldbespace;
@@ -21,11 +20,8 @@ use std::fmt;
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DeleteStatement {
 	pub what: Values,
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub cond: Option<Cond>,
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub output: Option<Output>,
-	#[serde(skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<Timeout>,
 }
 
@@ -40,9 +36,7 @@ impl DeleteStatement {
 		// Allowed to run?
 		opt.check(Level::No)?;
 		// Create a new iterator
-		let mut i = Iterator::new();
-		// Pass in current statement
-		i.stmt = Statement::from(self);
+		let mut i = Iterator::from(self);
 		// Ensure futures are stored
 		let opt = &opt.futures(false);
 		// Loop over the delete targets
