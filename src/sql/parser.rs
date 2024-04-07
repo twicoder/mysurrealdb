@@ -1,28 +1,67 @@
 use crate::err::Error;
+use crate::sql::error::Error::ParserError;
+use crate::sql::error::Error::ScriptError;
 use crate::sql::query::{query, Query};
 use nom::Err;
 use std::str;
 
-#[allow(dead_code)]
 pub fn parse(input: &str) -> Result<Query, Error> {
-	match query(input) {
-		Ok((_, query)) => {
-			if query.empty() {
-				Err(Error::EmptyError)
-			} else {
-				Ok(query)
-			}
-		}
-		Err(Err::Error(e)) => Err(Error::ParseError {
-			pos: input.len() - e.input.len(),
-			sql: String::from(e.input),
-		}),
-		Err(Err::Failure(e)) => Err(Error::ParseError {
-			pos: input.len() - e.input.len(),
-			sql: String::from(e.input),
-		}),
-		Err(Err::Incomplete(_)) => Err(Error::EmptyError),
+	match input.trim().len() {
+		0 => Err(Error::EmptyError),
+		_ => match query(input) {
+			Ok((_, query)) => Ok(query),
+			Err(Err::Error(e)) => match e {
+				ParserError(e) => match locate(input, e) {
+					(s, l, c) => Err(Error::ParseError {
+						line: l,
+						char: c,
+						sql: s.to_string(),
+					}),
+				},
+				ScriptError(e) => Err(Error::LanguageError {
+					message: e,
+				}),
+			},
+			Err(Err::Failure(e)) => match e {
+				ParserError(e) => match locate(input, e) {
+					(s, l, c) => Err(Error::ParseError {
+						line: l,
+						char: c,
+						sql: s.to_string(),
+					}),
+				},
+				ScriptError(e) => Err(Error::LanguageError {
+					message: e,
+				}),
+			},
+			_ => unreachable!(),
+		},
 	}
+}
+
+fn truncate(s: &str, l: usize) -> &str {
+	match s.char_indices().nth(l) {
+		None => s,
+		Some((i, _)) => &s[..i],
+	}
+}
+
+fn locate<'a>(input: &str, tried: &'a str) -> (&'a str, usize, usize) {
+	let index = input.len() - tried.len();
+	let tried = truncate(&tried, 100);
+	let lines = input.split('\n').collect::<Vec<&str>>();
+	let lines = lines.iter().map(|l| l.len()).enumerate();
+	let (mut total, mut chars) = (0, 0);
+	for (line, size) in lines {
+		total += size + 1;
+		if index < total {
+			let line_num = line + 1;
+			let char_num = index - chars;
+			return (tried, line_num, char_num);
+		}
+		chars += size + 1;
+	}
+	return (tried, 0, 0);
 }
 
 #[cfg(test)]

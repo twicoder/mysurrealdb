@@ -1,6 +1,6 @@
+use crate::sql::error::IResult;
 use crate::sql::statement::{statements, Statement, Statements};
 use nom::combinator::all_consuming;
-use nom::IResult;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str;
@@ -11,10 +11,6 @@ pub struct Query {
 }
 
 impl Query {
-	pub fn empty(&self) -> bool {
-		self.statements.len() == 0
-	}
-
 	pub fn statements(&self) -> &Vec<Statement> {
 		&self.statements.0
 	}
