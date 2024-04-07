@@ -11,19 +11,21 @@ use crate::sql::error::IResult;
 use crate::sql::output::{output, Output};
 use crate::sql::timeout::{timeout, Timeout};
 use crate::sql::value::{whats, Value, Values};
+use derive::Store;
 use nom::bytes::complete::tag_no_case;
 use nom::combinator::opt;
 use nom::sequence::preceded;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct UpdateStatement {
 	pub what: Values,
 	pub data: Option<Data>,
 	pub cond: Option<Cond>,
 	pub output: Option<Output>,
 	pub timeout: Option<Timeout>,
+	pub parallel: bool,
 }
 
 impl UpdateStatement {
@@ -75,6 +77,9 @@ impl fmt::Display for UpdateStatement {
 		if let Some(ref v) = self.timeout {
 			write!(f, " {}", v)?
 		}
+		if self.parallel {
+			write!(f, " PARALLEL")?
+		}
 		Ok(())
 	}
 }
@@ -87,6 +92,7 @@ pub fn update(i: &str) -> IResult<&str, UpdateStatement> {
 	let (i, cond) = opt(preceded(shouldbespace, cond))(i)?;
 	let (i, output) = opt(preceded(shouldbespace, output))(i)?;
 	let (i, timeout) = opt(preceded(shouldbespace, timeout))(i)?;
+	let (i, parallel) = opt(preceded(shouldbespace, tag_no_case("PARALLEL")))(i)?;
 	Ok((
 		i,
 		UpdateStatement {
@@ -95,6 +101,7 @@ pub fn update(i: &str) -> IResult<&str, UpdateStatement> {
 			cond,
 			output,
 			timeout,
+			parallel: parallel.is_some(),
 		},
 	))
 }

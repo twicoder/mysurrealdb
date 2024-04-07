@@ -17,13 +17,14 @@ use crate::sql::start::{start, Start};
 use crate::sql::timeout::{timeout, Timeout};
 use crate::sql::value::{selects, Value, Values};
 use crate::sql::version::{version, Version};
+use derive::Store;
 use nom::bytes::complete::tag_no_case;
 use nom::combinator::opt;
 use nom::sequence::preceded;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct SelectStatement {
 	pub expr: Fields,
 	pub what: Values,
@@ -36,6 +37,7 @@ pub struct SelectStatement {
 	pub fetch: Option<Fetchs>,
 	pub version: Option<Version>,
 	pub timeout: Option<Timeout>,
+	pub parallel: bool,
 }
 
 impl SelectStatement {
@@ -113,6 +115,9 @@ impl fmt::Display for SelectStatement {
 		if let Some(ref v) = self.timeout {
 			write!(f, " {}", v)?
 		}
+		if self.parallel {
+			write!(f, " PARALLEL")?
+		}
 		Ok(())
 	}
 }
@@ -134,6 +139,7 @@ pub fn select(i: &str) -> IResult<&str, SelectStatement> {
 	let (i, fetch) = opt(preceded(shouldbespace, fetch))(i)?;
 	let (i, version) = opt(preceded(shouldbespace, version))(i)?;
 	let (i, timeout) = opt(preceded(shouldbespace, timeout))(i)?;
+	let (i, parallel) = opt(preceded(shouldbespace, tag_no_case("PARALLEL")))(i)?;
 	Ok((
 		i,
 		SelectStatement {
@@ -148,6 +154,7 @@ pub fn select(i: &str) -> IResult<&str, SelectStatement> {
 			fetch,
 			version,
 			timeout,
+			parallel: parallel.is_some(),
 		},
 	))
 }

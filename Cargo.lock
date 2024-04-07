@@ -2637,6 +2637,7 @@ dependencies = [
  "sha-1",
  "sha2",
  "slug",
+ "surrealdb-derive",
  "thiserror",
  "tikv-client",
  "tokio",
@@ -2644,6 +2645,16 @@ dependencies = [
  "url",
  "utf-8",
  "uuid 0.8.2",
+]
+
+[[package]]
+name = "surrealdb-derive"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6045ae5b030a2485f0862dd735eff304b72a7cef3d4d541b3a46a45565737548"
+dependencies = [
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]

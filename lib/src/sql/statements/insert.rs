@@ -11,6 +11,7 @@ use crate::sql::output::{output, Output};
 use crate::sql::table::{table, Table};
 use crate::sql::timeout::{timeout, Timeout};
 use crate::sql::value::Value;
+use derive::Store;
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
 use nom::combinator::opt;
@@ -18,7 +19,7 @@ use nom::sequence::preceded;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct InsertStatement {
 	pub into: Table,
 	pub data: Data,
@@ -26,6 +27,7 @@ pub struct InsertStatement {
 	pub update: Option<Data>,
 	pub output: Option<Output>,
 	pub timeout: Option<Timeout>,
+	pub parallel: bool,
 }
 
 impl InsertStatement {
@@ -79,6 +81,9 @@ impl fmt::Display for InsertStatement {
 		if let Some(ref v) = self.timeout {
 			write!(f, " {}", v)?
 		}
+		if self.parallel {
+			write!(f, " PARALLEL")?
+		}
 		Ok(())
 	}
 }
@@ -92,6 +97,7 @@ pub fn insert(i: &str) -> IResult<&str, InsertStatement> {
 	let (i, update) = opt(preceded(shouldbespace, update))(i)?;
 	let (i, output) = opt(preceded(shouldbespace, output))(i)?;
 	let (i, timeout) = opt(preceded(shouldbespace, timeout))(i)?;
+	let (i, parallel) = opt(preceded(shouldbespace, tag_no_case("PARALLEL")))(i)?;
 	Ok((
 		i,
 		InsertStatement {
@@ -101,6 +107,7 @@ pub fn insert(i: &str) -> IResult<&str, InsertStatement> {
 			update,
 			output,
 			timeout,
+			parallel: parallel.is_some(),
 		},
 	))
 }
