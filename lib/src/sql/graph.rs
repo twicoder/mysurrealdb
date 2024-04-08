@@ -1,9 +1,10 @@
 use crate::sql::comment::mightbespace;
 use crate::sql::comment::shouldbespace;
+use crate::sql::cond::{cond, Cond};
+use crate::sql::dir::{dir, Dir};
 use crate::sql::error::IResult;
 use crate::sql::idiom::{idiom, Idiom};
-use crate::sql::table::{tables, Tables};
-use crate::sql::value::{value, Value};
+use crate::sql::table::{table, tables, Tables};
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
 use nom::character::complete::char;
@@ -12,53 +13,36 @@ use nom::combinator::opt;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
-pub enum Dir {
-	In,
-	Out,
-	Both,
-}
-
-impl Default for Dir {
-	fn default() -> Dir {
-		Dir::Both
-	}
-}
-
-impl fmt::Display for Dir {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		match self {
-			Dir::In => write!(f, "<-"),
-			Dir::Out => write!(f, "->"),
-			Dir::Both => write!(f, "<->"),
-		}
-	}
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Graph {
 	pub dir: Dir,
 	pub what: Tables,
-	pub cond: Option<Value>,
+	pub cond: Option<Cond>,
 	pub alias: Option<Idiom>,
+}
+
+impl Graph {
+	pub fn to_raw(&self) -> String {
+		self.to_string()
+	}
 }
 
 impl fmt::Display for Graph {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		if self.what.0.len() <= 1 && self.cond.is_none() && self.alias.is_none() {
-			write!(f, "{}", self.dir,)?;
+			write!(f, "{}", self.dir)?;
 			match self.what.len() {
 				0 => write!(f, "?"),
 				_ => write!(f, "{}", self.what),
 			}
 		} else {
-			write!(f, "{}(", self.dir,)?;
+			write!(f, "{}(", self.dir)?;
 			match self.what.len() {
 				0 => write!(f, "?"),
 				_ => write!(f, "{}", self.what),
 			}?;
 			if let Some(ref v) = self.cond {
-				write!(f, " WHERE {}", v)?
+				write!(f, " {}", v)?
 			}
 			if let Some(ref v) = self.alias {
 				write!(f, " AS {}", v)?
@@ -69,17 +53,12 @@ impl fmt::Display for Graph {
 }
 
 pub fn graph(i: &str) -> IResult<&str, Graph> {
-	alt((graph_in, graph_out, graph_both))(i)
-}
-
-fn graph_in(i: &str) -> IResult<&str, Graph> {
-	let (i, _) = char('<')(i)?;
-	let (i, _) = char('-')(i)?;
+	let (i, dir) = dir(i)?;
 	let (i, (what, cond, alias)) = alt((simple, custom))(i)?;
 	Ok((
 		i,
 		Graph {
-			dir: Dir::In,
+			dir,
 			what,
 			cond,
 			alias,
@@ -87,76 +66,39 @@ fn graph_in(i: &str) -> IResult<&str, Graph> {
 	))
 }
 
-fn graph_out(i: &str) -> IResult<&str, Graph> {
-	let (i, _) = char('-')(i)?;
-	let (i, _) = char('>')(i)?;
-	let (i, (what, cond, alias)) = alt((simple, custom))(i)?;
-	Ok((
-		i,
-		Graph {
-			dir: Dir::Out,
-			what,
-			cond,
-			alias,
-		},
-	))
-}
-
-fn graph_both(i: &str) -> IResult<&str, Graph> {
-	let (i, _) = char('<')(i)?;
-	let (i, _) = char('-')(i)?;
-	let (i, _) = char('>')(i)?;
-	let (i, (what, cond, alias)) = alt((simple, custom))(i)?;
-	Ok((
-		i,
-		Graph {
-			dir: Dir::Both,
-			what,
-			cond,
-			alias,
-		},
-	))
-}
-
-fn simple(i: &str) -> IResult<&str, (Tables, Option<Value>, Option<Idiom>)> {
-	let (i, w) = what(i)?;
+fn simple(i: &str) -> IResult<&str, (Tables, Option<Cond>, Option<Idiom>)> {
+	let (i, w) = alt((any, one))(i)?;
 	Ok((i, (w, None, None)))
 }
 
-fn custom(i: &str) -> IResult<&str, (Tables, Option<Value>, Option<Idiom>)> {
+fn custom(i: &str) -> IResult<&str, (Tables, Option<Cond>, Option<Idiom>)> {
 	let (i, _) = char('(')(i)?;
 	let (i, _) = mightbespace(i)?;
-	let (i, w) = what(i)?;
-	let (i, c) = opt(cond)(i)?;
-	let (i, a) = opt(alias)(i)?;
+	let (i, w) = alt((any, tables))(i)?;
+	let (i, c) = opt(|i| {
+		let (i, _) = shouldbespace(i)?;
+		let (i, v) = cond(i)?;
+		Ok((i, v))
+	})(i)?;
+	let (i, a) = opt(|i| {
+		let (i, _) = shouldbespace(i)?;
+		let (i, _) = tag_no_case("AS")(i)?;
+		let (i, _) = shouldbespace(i)?;
+		let (i, v) = idiom(i)?;
+		Ok((i, v))
+	})(i)?;
 	let (i, _) = mightbespace(i)?;
 	let (i, _) = char(')')(i)?;
 	Ok((i, (w, c, a)))
 }
 
-fn what(i: &str) -> IResult<&str, Tables> {
-	let (i, v) = alt((any, tables))(i)?;
-	Ok((i, v))
+fn one(i: &str) -> IResult<&str, Tables> {
+	let (i, v) = table(i)?;
+	Ok((i, Tables::from(v)))
 }
 
 fn any(i: &str) -> IResult<&str, Tables> {
 	map(char('?'), |_| Tables::default())(i)
-}
-
-fn cond(i: &str) -> IResult<&str, Value> {
-	let (i, _) = shouldbespace(i)?;
-	let (i, _) = tag_no_case("WHERE")(i)?;
-	let (i, _) = shouldbespace(i)?;
-	let (i, v) = value(i)?;
-	Ok((i, v))
-}
-
-fn alias(i: &str) -> IResult<&str, Idiom> {
-	let (i, _) = shouldbespace(i)?;
-	let (i, _) = tag_no_case("AS")(i)?;
-	let (i, _) = shouldbespace(i)?;
-	let (i, v) = idiom(i)?;
-	Ok((i, v))
 }
 
 #[cfg(test)]
