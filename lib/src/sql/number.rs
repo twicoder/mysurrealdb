@@ -1,4 +1,5 @@
 use crate::sql::comment::comment;
+use crate::sql::error::Error::ParserError;
 use crate::sql::error::IResult;
 use crate::sql::operator::{assigner, operator};
 use dec::prelude::FromPrimitive;
@@ -6,12 +7,14 @@ use dec::prelude::ToPrimitive;
 use dec::Decimal;
 use dec::MathematicalOps;
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::character::complete::char;
+use nom::character::complete::digit1;
 use nom::character::complete::multispace1;
 use nom::combinator::eof;
 use nom::combinator::map;
 use nom::combinator::peek;
 use nom::number::complete::recognize_float;
+use nom::Err::Error;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
@@ -29,91 +32,79 @@ pub enum Number {
 
 impl Default for Number {
 	fn default() -> Self {
-		Number::Decimal(Decimal::from(0))
+		Number::Int(0)
 	}
 }
 
 impl From<i8> for Number {
 	fn from(i: i8) -> Self {
-		Number::Decimal(Decimal::from(i))
+		Number::Int(i as i64)
 	}
 }
 
 impl From<i16> for Number {
 	fn from(i: i16) -> Self {
-		Number::Decimal(Decimal::from(i))
+		Number::Int(i as i64)
 	}
 }
 
 impl From<i32> for Number {
 	fn from(i: i32) -> Self {
-		Number::Decimal(Decimal::from(i))
+		Number::Int(i as i64)
 	}
 }
 
 impl From<i64> for Number {
 	fn from(i: i64) -> Self {
-		Number::Decimal(Decimal::from(i))
-	}
-}
-
-impl From<i128> for Number {
-	fn from(i: i128) -> Self {
-		Number::Decimal(Decimal::from(i))
+		Number::Int(i as i64)
 	}
 }
 
 impl From<isize> for Number {
 	fn from(i: isize) -> Self {
-		Number::Decimal(Decimal::from(i))
+		Number::Int(i as i64)
 	}
 }
 
 impl From<u8> for Number {
 	fn from(i: u8) -> Self {
-		Number::Decimal(Decimal::from(i))
+		Number::Int(i as i64)
 	}
 }
 
 impl From<u16> for Number {
 	fn from(i: u16) -> Self {
-		Number::Decimal(Decimal::from(i))
+		Number::Int(i as i64)
 	}
 }
 
 impl From<u32> for Number {
 	fn from(i: u32) -> Self {
-		Number::Decimal(Decimal::from(i))
+		Number::Int(i as i64)
 	}
 }
 
 impl From<u64> for Number {
 	fn from(i: u64) -> Self {
-		Number::Decimal(Decimal::from(i))
-	}
-}
-
-impl From<u128> for Number {
-	fn from(i: u128) -> Self {
-		Number::Decimal(Decimal::from(i))
+		Number::Int(i as i64)
 	}
 }
 
 impl From<usize> for Number {
 	fn from(i: usize) -> Self {
-		Number::Decimal(Decimal::from(i))
+		Number::Int(i as i64)
 	}
 }
 
 impl From<f32> for Number {
 	fn from(f: f32) -> Self {
-		Number::Decimal(Decimal::from_f32(f).unwrap_or_default())
+		Number::Float(f as f64)
 	}
 }
 
 impl From<f64> for Number {
 	fn from(f: f64) -> Self {
-		Number::Decimal(Decimal::from_f64(f).unwrap_or_default())
+		Number::Float(f as f64)
 	}
 }
 
@@ -511,16 +502,41 @@ impl<'a> Product<&'a Self> for Number {
 }
 
 pub fn number(i: &str) -> IResult<&str, Number> {
+	alt((integer, decimal))(i)
+}
+
+fn integer(i: &str) -> IResult<&str, Number> {
+	let (i, v) = digit1(i)?;
+	let (i, _) = peek(alt((
+		map(multispace1, |_| ()),
+		map(operator, |_| ()),
+		map(assigner, |_| ()),
+		map(comment, |_| ()),
+		map(char(')'), |_| ()),
+		map(char(']'), |_| ()),
+		map(char('}'), |_| ()),
+		map(char(';'), |_| ()),
+		map(char(','), |_| ()),
+		map(eof, |_| ()),
+	)))(i)?;
+	match v.parse::<i64>() {
+		Ok(v) => Ok((i, Number::from(v))),
+		_ => Err(Error(ParserError(i))),
+	}
+}
+
+fn decimal(i: &str) -> IResult<&str, Number> {
 	let (i, v) = recognize_float(i)?;
 	let (i, _) = peek(alt((
 		map(multispace1, |_| ()),
 		map(operator, |_| ()),
 		map(assigner, |_| ()),
 		map(comment, |_| ()),
-		map(tag("]"), |_| ()),
-		map(tag("}"), |_| ()),
-		map(tag(";"), |_| ()),
-		map(tag(","), |_| ()),
+		map(char(')'), |_| ()),
+		map(char(']'), |_| ()),
+		map(char('}'), |_| ()),
+		map(char(';'), |_| ()),
+		map(char(','), |_| ()),
 		map(eof, |_| ()),
 	)))(i)?;
 	Ok((i, Number::from(v)))
