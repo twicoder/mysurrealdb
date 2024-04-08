@@ -2,6 +2,7 @@ pub use self::value::*;
 
 mod array;
 mod clear;
+mod compare;
 mod decrement;
 mod def;
 mod del;
@@ -13,6 +14,7 @@ mod last;
 mod merge;
 mod object;
 mod patch;
+mod pick;
 mod replace;
 mod set;
 mod single;
