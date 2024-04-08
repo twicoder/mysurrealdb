@@ -30,14 +30,8 @@ impl From<String> for Ident {
 	}
 }
 
-impl<'a> From<&'a str> for Ident {
+impl From<&str> for Ident {
 	fn from(i: &str) -> Ident {
-		Ident(String::from(i))
-	}
-}
-
-impl<'a> From<&'a String> for Ident {
-	fn from(i: &String) -> Ident {
 		Ident(String::from(i))
 	}
 }
@@ -46,6 +40,12 @@ impl Deref for Ident {
 	type Target = String;
 	fn deref(&self) -> &Self::Target {
 		&self.0
+	}
+}
+
+impl Ident {
+	pub fn to_raw(&self) -> String {
+		self.0.to_string()
 	}
 }
 

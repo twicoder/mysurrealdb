@@ -1,5 +1,6 @@
 use crate::dbs::Options;
 use crate::dbs::Transaction;
+use crate::dbs::Workable;
 use crate::err::Error;
 use crate::sql::statements::define::DefineEventStatement;
 use crate::sql::statements::define::DefineFieldStatement;
@@ -9,23 +10,24 @@ use crate::sql::thing::Thing;
 use crate::sql::value::Value;
 use std::borrow::Cow;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Document<'a> {
 	pub(super) id: Option<Thing>,
+	pub(super) extras: Workable,
 	pub(super) current: Cow<'a, Value>,
 	pub(super) initial: Cow<'a, Value>,
 }
 
 impl<'a> From<&Document<'a>> for Vec<u8> {
 	fn from(val: &Document<'a>) -> Vec<u8> {
-		msgpack::to_vec(&val.current).unwrap()
+		val.current.as_ref().into()
 	}
 }
 
 impl<'a> Document<'a> {
-	pub fn new(id: Option<Thing>, val: &'a Value) -> Self {
+	pub fn new(id: Option<Thing>, val: &'a Value, ext: Workable) -> Self {
 		Document {
 			id,
+			extras: ext,
 			current: Cow::Borrowed(val),
 			initial: Cow::Borrowed(val),
 		}

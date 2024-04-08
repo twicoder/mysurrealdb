@@ -67,6 +67,15 @@ impl Idiom {
 	pub fn to_path(&self) -> String {
 		format!("/{}", self).replace(']', "").replace(&['.', '['][..], "/")
 	}
+	///
+	pub fn simplify(&self) -> Idiom {
+		self.0
+			.iter()
+			.cloned()
+			.filter(|p| matches!(p, Part::Field(_) | Part::Graph(_)))
+			.collect::<Vec<_>>()
+			.into()
+	}
 }
 
 impl Idiom {

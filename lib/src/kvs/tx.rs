@@ -185,7 +185,7 @@ impl Transaction {
 	pub async fn set<K, V>(&mut self, key: K, val: V) -> Result<(), Error>
 	where
 		K: Into<Key>,
-		V: Into<Key>,
+		V: Into<Val>,
 	{
 		match self {
 			#[cfg(feature = "kv-echodb")]
@@ -210,7 +210,7 @@ impl Transaction {
 	pub async fn put<K, V>(&mut self, key: K, val: V) -> Result<(), Error>
 	where
 		K: Into<Key>,
-		V: Into<Key>,
+		V: Into<Val>,
 	{
 		match self {
 			#[cfg(feature = "kv-echodb")]
@@ -720,7 +720,7 @@ impl Transaction {
 			.put(
 				key,
 				DefineNamespaceStatement {
-					name: ns.into(),
+					name: ns.to_owned().into(),
 				},
 			)
 			.await;
@@ -733,7 +733,7 @@ impl Transaction {
 			.put(
 				key,
 				DefineDatabaseStatement {
-					name: db.into(),
+					name: db.to_owned().into(),
 				},
 			)
 			.await;
@@ -746,7 +746,7 @@ impl Transaction {
 			.put(
 				key,
 				DefineTableStatement {
-					name: tb.into(),
+					name: tb.to_owned().into(),
 					..DefineTableStatement::default()
 				},
 			)

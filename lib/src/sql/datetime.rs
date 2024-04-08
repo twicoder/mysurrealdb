@@ -1,5 +1,6 @@
 use crate::sql::common::{take_digits, take_digits_range, take_u32};
 use crate::sql::error::IResult;
+use crate::sql::serde::is_internal_serialization;
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use nom::branch::alt;
 use nom::character::complete::char;
@@ -31,7 +32,7 @@ impl From<DateTime<Utc>> for Datetime {
 	}
 }
 
-impl<'a> From<&'a str> for Datetime {
+impl From<&str> for Datetime {
 	fn from(s: &str) -> Self {
 		match datetime_raw(s) {
 			Ok((_, v)) => v,
@@ -58,10 +59,10 @@ impl Serialize for Datetime {
 	where
 		S: serde::Serializer,
 	{
-		if serializer.is_human_readable() {
-			serializer.serialize_some(&self.0)
-		} else {
+		if is_internal_serialization() {
 			serializer.serialize_newtype_struct("Datetime", &self.0)
+		} else {
+			serializer.serialize_some(&self.0)
 		}
 	}
 }

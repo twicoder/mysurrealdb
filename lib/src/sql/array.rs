@@ -7,6 +7,7 @@ use crate::sql::common::commas;
 use crate::sql::error::IResult;
 use crate::sql::number::Number;
 use crate::sql::operation::Operation;
+use crate::sql::serde::is_internal_serialization;
 use crate::sql::strand::Strand;
 use crate::sql::value::{value, Value};
 use nom::character::complete::char;
@@ -35,19 +36,7 @@ impl From<Vec<Value>> for Array {
 
 impl From<Vec<i32>> for Array {
 	fn from(v: Vec<i32>) -> Self {
-		Array(v.into_iter().map(|x| x.into()).collect())
-	}
-}
-
-impl From<Vec<String>> for Array {
-	fn from(v: Vec<String>) -> Self {
-		Array(v.into_iter().map(|x| x.into()).collect())
-	}
-}
-
-impl From<Vec<Vec<Value>>> for Array {
-	fn from(v: Vec<Vec<Value>>) -> Self {
-		Array(v.into_iter().map(|x| x.into()).collect())
+		Array(v.into_iter().map(Value::from).collect())
 	}
 }
 
@@ -159,10 +148,10 @@ impl Serialize for Array {
 	where
 		S: serde::Serializer,
 	{
-		if serializer.is_human_readable() {
-			serializer.serialize_some(&self.0)
-		} else {
+		if is_internal_serialization() {
 			serializer.serialize_newtype_struct("Array", &self.0)
+		} else {
+			serializer.serialize_some(&self.0)
 		}
 	}
 }

@@ -22,6 +22,7 @@ use crate::sql::operation::Operation;
 use crate::sql::param::{param, Param};
 use crate::sql::part::Part;
 use crate::sql::regex::{regex, Regex};
+use crate::sql::serde::is_internal_serialization;
 use crate::sql::strand::{strand, Strand};
 use crate::sql::subquery::{subquery, Subquery};
 use crate::sql::table::{table, Table};
@@ -311,7 +312,7 @@ impl From<String> for Value {
 	}
 }
 
-impl<'a> From<&'a str> for Value {
+impl From<&str> for Value {
 	fn from(v: &str) -> Self {
 		Value::Strand(Strand::from(v))
 	}
@@ -359,12 +360,6 @@ impl From<Vec<i32>> for Value {
 	}
 }
 
-impl From<Vec<String>> for Value {
-	fn from(v: Vec<String>) -> Self {
-		Value::Array(Array::from(v))
-	}
-}
-
 impl From<Vec<Value>> for Value {
 	fn from(v: Vec<Value>) -> Self {
 		Value::Array(Array::from(v))
@@ -373,12 +368,6 @@ impl From<Vec<Value>> for Value {
 
 impl From<Vec<Operation>> for Value {
 	fn from(v: Vec<Operation>) -> Self {
-		Value::Array(Array::from(v))
-	}
-}
-
-impl From<Vec<Vec<Value>>> for Value {
-	fn from(v: Vec<Vec<Value>>) -> Self {
 		Value::Array(Array::from(v))
 	}
 }
@@ -650,17 +639,18 @@ impl Value {
 	}
 
 	pub fn to_idiom(&self) -> Idiom {
-		self.to_strand()
-			.as_str()
-			.trim_start_matches('/')
-			.split(&['.', '/'][..])
-			.map(Part::from)
-			.collect::<Vec<Part>>()
-			.into()
-	}
-
-	pub fn to_vec(&self) -> Result<Vec<u8>, Error> {
-		msgpack::to_vec(&self).map_err(|e| e.into())
+		match self {
+			Value::Idiom(v) => v.simplify(),
+			Value::Strand(v) => v.0.to_string().into(),
+			Value::Datetime(v) => v.0.to_string().into(),
+			Value::Function(v) => match v.as_ref() {
+				Function::Future(_) => "fn::future".to_string().into(),
+				Function::Script(_) => "fn::script".to_string().into(),
+				Function::Normal(f, _) => f.to_string().into(),
+				_ => v.to_string().into(),
+			},
+			_ => self.to_string().into(),
+		}
 	}
 
 	// -----------------------------------
@@ -751,6 +741,20 @@ impl Value {
 				_ => Value::None,
 			},
 		}
+	}
+
+	// -----------------------------------
+	// JSON Path conversion
+	// -----------------------------------
+
+	pub fn jsonpath(&self) -> Idiom {
+		self.to_strand()
+			.as_str()
+			.trim_start_matches('/')
+			.split(&['.', '/'][..])
+			.map(Part::from)
+			.collect::<Vec<Part>>()
+			.into()
 	}
 
 	// -----------------------------------
@@ -1010,24 +1014,7 @@ impl Serialize for Value {
 	where
 		S: serde::Serializer,
 	{
-		if s.is_human_readable() {
-			match self {
-				Value::None => s.serialize_none(),
-				Value::Void => s.serialize_none(),
-				Value::Null => s.serialize_none(),
-				Value::True => s.serialize_bool(true),
-				Value::False => s.serialize_bool(false),
-				Value::Thing(v) => s.serialize_some(v),
-				Value::Array(v) => s.serialize_some(v),
-				Value::Object(v) => s.serialize_some(v),
-				Value::Number(v) => s.serialize_some(v),
-				Value::Strand(v) => s.serialize_some(v),
-				Value::Geometry(v) => s.serialize_some(v),
-				Value::Duration(v) => s.serialize_some(v),
-				Value::Datetime(v) => s.serialize_some(v),
-				_ => s.serialize_none(),
-			}
-		} else {
+		if is_internal_serialization() {
 			match self {
 				Value::None => s.serialize_unit_variant("Value", 0, "None"),
 				Value::Void => s.serialize_unit_variant("Value", 1, "Void"),
@@ -1050,6 +1037,23 @@ impl Serialize for Value {
 				Value::Function(v) => s.serialize_newtype_variant("Value", 18, "Function", v),
 				Value::Subquery(v) => s.serialize_newtype_variant("Value", 19, "Subquery", v),
 				Value::Expression(v) => s.serialize_newtype_variant("Value", 20, "Expression", v),
+			}
+		} else {
+			match self {
+				Value::None => s.serialize_none(),
+				Value::Void => s.serialize_none(),
+				Value::Null => s.serialize_none(),
+				Value::True => s.serialize_bool(true),
+				Value::False => s.serialize_bool(false),
+				Value::Thing(v) => s.serialize_some(v),
+				Value::Array(v) => s.serialize_some(v),
+				Value::Object(v) => s.serialize_some(v),
+				Value::Number(v) => s.serialize_some(v),
+				Value::Strand(v) => s.serialize_some(v),
+				Value::Geometry(v) => s.serialize_some(v),
+				Value::Duration(v) => s.serialize_some(v),
+				Value::Datetime(v) => s.serialize_some(v),
+				_ => s.serialize_none(),
 			}
 		}
 	}
@@ -1161,6 +1165,7 @@ pub fn select(i: &str) -> IResult<&str, Value> {
 
 pub fn what(i: &str) -> IResult<&str, Value> {
 	alt((
+		map(subquery, |v| Value::Subquery(Box::new(v))),
 		map(function, |v| Value::Function(Box::new(v))),
 		map(param, Value::Param),
 		map(model, Value::Model),

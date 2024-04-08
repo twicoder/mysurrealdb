@@ -7,6 +7,8 @@ use crate::sql::common::{commas, val_char};
 use crate::sql::error::IResult;
 use crate::sql::escape::escape_key;
 use crate::sql::operation::{Op, Operation};
+use crate::sql::serde::is_internal_serialization;
+use crate::sql::thing::Thing;
 use crate::sql::value::{value, Value};
 use nom::branch::alt;
 use nom::bytes::complete::is_not;
@@ -76,12 +78,20 @@ impl IntoIterator for Object {
 }
 
 impl Object {
+	// Fetch the record id if there is one
+	pub fn rid(&self) -> Option<Thing> {
+		match self.get("id") {
+			Some(Value::Thing(v)) => Some(v.clone()),
+			_ => None,
+		}
+	}
+	// Convert this object to a diff-match-patch operation
 	pub fn to_operation(&self) -> Result<Operation, Error> {
 		match self.get("op") {
 			Some(o) => match self.get("path") {
 				Some(p) => Ok(Operation {
 					op: o.into(),
-					path: p.to_idiom(),
+					path: p.jsonpath(),
 					value: match self.get("value") {
 						Some(v) => v.clone(),
 						None => Value::Null,
@@ -135,15 +145,15 @@ impl Serialize for Object {
 	where
 		S: serde::Serializer,
 	{
-		if serializer.is_human_readable() {
+		if is_internal_serialization() {
+			serializer.serialize_newtype_struct("Object", &self.0)
+		} else {
 			let mut map = serializer.serialize_map(Some(self.len()))?;
 			for (ref k, ref v) in &self.0 {
 				map.serialize_key(k)?;
 				map.serialize_value(v)?;
 			}
 			map.end()
-		} else {
-			serializer.serialize_newtype_struct("Object", &self.0)
 		}
 	}
 }
