@@ -1,4 +1,6 @@
 use crate::sql::cond::Cond;
+use crate::sql::fetch::Fetchs;
+use crate::sql::field::Fields;
 use crate::sql::group::Groups;
 use crate::sql::limit::Limit;
 use crate::sql::order::Orders;
@@ -82,6 +84,13 @@ impl fmt::Display for Statement {
 }
 
 impl Statement {
+	// Returns any query fields if specified
+	pub fn expr(self: &Statement) -> Option<&Fields> {
+		match self {
+			Statement::Select(v) => Some(&v.expr),
+			_ => None,
+		}
+	}
 	// Returns any SPLIT clause if specified
 	pub fn conds(self: &Statement) -> Option<&Cond> {
 		match self {
@@ -109,6 +118,13 @@ impl Statement {
 	pub fn order(self: &Statement) -> Option<&Orders> {
 		match self {
 			Statement::Select(v) => v.order.as_ref(),
+			_ => None,
+		}
+	}
+	// Returns any FETCH clause if specified
+	pub fn fetch(self: &Statement) -> Option<&Fetchs> {
+		match self {
+			Statement::Select(v) => v.fetch.as_ref(),
 			_ => None,
 		}
 	}
