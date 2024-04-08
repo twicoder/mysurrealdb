@@ -6,7 +6,7 @@ use crate::doc::Document;
 use crate::err::Error;
 
 impl<'a> Document<'a> {
-	pub async fn empty(
+	pub async fn exist(
 		&self,
 		_ctx: &Runtime,
 		_opt: &Options,
@@ -14,11 +14,13 @@ impl<'a> Document<'a> {
 		_stm: &Statement,
 	) -> Result<(), Error> {
 		// Check if this record exists
-		if self.id.is_some() {
-			// There is no current record
-			if self.current.is_none() {
-				// Ignore this requested record
-				return Err(Error::Ignore);
+		if let Some(id) = &self.id {
+			// If there is a current value
+			if self.current.is_some() {
+				// The record already exists
+				return Err(Error::RecordExists {
+					thing: id.clone(),
+				});
 			}
 		}
 		// Carry on
