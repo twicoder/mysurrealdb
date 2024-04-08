@@ -45,7 +45,7 @@ impl Array {
 		txn: &Transaction,
 		chn: &Sender<(Option<Thing>, Value)>,
 	) -> Result<(), Error> {
-		for v in self.value.into_iter() {
+		for v in self {
 			if ctx.is_ok() {
 				match v {
 					Value::Array(v) => v.process(ctx, opt, stm, txn, chn).await?,
@@ -127,8 +127,8 @@ impl Table {
 		chn: &Sender<(Option<Thing>, Value)>,
 	) -> Result<(), Error> {
 		if ctx.is_ok() {
-			let beg = thing::prefix(opt.ns(), opt.db(), &self.name);
-			let end = thing::suffix(opt.ns(), opt.db(), &self.name);
+			let beg = thing::prefix(opt.ns(), opt.db(), &self);
+			let end = thing::suffix(opt.ns(), opt.db(), &self);
 			let mut nxt: Option<Vec<u8>> = None;
 			loop {
 				if ctx.is_ok() {

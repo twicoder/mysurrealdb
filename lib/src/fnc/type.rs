@@ -93,21 +93,19 @@ pub fn string(_: &Runtime, mut args: Vec<Value>) -> Result<Value, Error> {
 }
 
 pub fn table(_: &Runtime, mut args: Vec<Value>) -> Result<Value, Error> {
-	Ok(Value::Table(Table {
-		name: args.remove(0).as_strand().value,
-	}))
+	Ok(Value::Table(Table(args.remove(0).as_string())))
 }
 
 pub fn thing(_: &Runtime, mut args: Vec<Value>) -> Result<Value, Error> {
 	let tb = args.remove(0);
 	match args.remove(0) {
 		Value::Thing(id) => Ok(Value::Thing(Thing {
-			tb: tb.as_strand().value,
+			tb: tb.as_string(),
 			id: id.id,
 		})),
 		id => Ok(Value::Thing(Thing {
-			tb: tb.as_strand().value,
-			id: id.as_strand().into(),
+			tb: tb.as_string(),
+			id: id.as_string().into(),
 		})),
 	}
 }

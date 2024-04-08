@@ -52,15 +52,6 @@ static MATCHER: Lazy<SkimMatcherV2> = Lazy::new(|| SkimMatcherV2::default().igno
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Values(pub Vec<Value>);
 
-impl Values {
-	pub fn len(&self) -> usize {
-		self.0.len()
-	}
-	pub fn is_empty(&self) -> bool {
-		self.0.is_empty()
-	}
-}
-
 impl Deref for Values {
 	type Target = Vec<Value>;
 	fn deref(&self) -> &Self::Target {
@@ -479,7 +470,7 @@ impl Value {
 	pub fn is_true(&self) -> bool {
 		match self {
 			Value::True => true,
-			Value::Strand(v) => v.value.to_ascii_lowercase() == "true",
+			Value::Strand(v) => v.to_ascii_lowercase() == "true",
 			_ => false,
 		}
 	}
@@ -487,7 +478,7 @@ impl Value {
 	pub fn is_false(&self) -> bool {
 		match self {
 			Value::False => true,
-			Value::Strand(v) => v.value.to_ascii_lowercase() == "false",
+			Value::Strand(v) => v.to_ascii_lowercase() == "false",
 			_ => false,
 		}
 	}
@@ -498,19 +489,19 @@ impl Value {
 			Value::False => false,
 			Value::Thing(_) => true,
 			Value::Geometry(_) => true,
-			Value::Array(v) => !v.value.is_empty(),
-			Value::Object(v) => !v.value.is_empty(),
-			Value::Strand(v) => !v.value.is_empty() && v.value.to_ascii_lowercase() != "false",
+			Value::Array(v) => !v.is_empty(),
+			Value::Object(v) => !v.is_empty(),
+			Value::Strand(v) => !v.is_empty() && v.to_ascii_lowercase() != "false",
 			Value::Number(v) => v.is_truthy(),
-			Value::Duration(v) => v.value.as_nanos() > 0,
-			Value::Datetime(v) => v.value.timestamp() > 0,
+			Value::Duration(v) => v.as_nanos() > 0,
+			Value::Datetime(v) => v.timestamp() > 0,
 			_ => false,
 		}
 	}
 
 	pub fn is_type_record(&self, types: &[Table]) -> bool {
 		match self {
-			Value::Thing(v) => types.iter().any(|t| t.name == v.tb),
+			Value::Thing(v) => types.iter().any(|tb| tb.0 == v.tb),
 			_ => false,
 		}
 	}
@@ -549,10 +540,10 @@ impl Value {
 	pub fn as_int(self) -> i64 {
 		match self {
 			Value::True => 1,
-			Value::Strand(v) => v.value.parse::<i64>().unwrap_or(0),
+			Value::Strand(v) => v.parse::<i64>().unwrap_or(0),
 			Value::Number(v) => v.as_int(),
-			Value::Duration(v) => v.value.as_secs() as i64,
-			Value::Datetime(v) => v.value.timestamp(),
+			Value::Duration(v) => v.as_secs() as i64,
+			Value::Datetime(v) => v.timestamp(),
 			_ => 0,
 		}
 	}
@@ -560,10 +551,10 @@ impl Value {
 	pub fn as_float(self) -> f64 {
 		match self {
 			Value::True => 1.0,
-			Value::Strand(v) => v.value.parse::<f64>().unwrap_or(0.0),
+			Value::Strand(v) => v.parse::<f64>().unwrap_or(0.0),
 			Value::Number(v) => v.as_float(),
-			Value::Duration(v) => v.value.as_secs() as f64,
-			Value::Datetime(v) => v.value.timestamp() as f64,
+			Value::Duration(v) => v.as_secs() as f64,
+			Value::Datetime(v) => v.timestamp() as f64,
 			_ => 0.0,
 		}
 	}
@@ -573,8 +564,8 @@ impl Value {
 			Value::True => BigDecimal::from(1),
 			Value::Number(v) => v.as_decimal(),
 			Value::Strand(v) => BigDecimal::from_str(v.as_str()).unwrap_or_default(),
-			Value::Duration(v) => v.value.as_secs().into(),
-			Value::Datetime(v) => v.value.timestamp().into(),
+			Value::Duration(v) => v.as_secs().into(),
+			Value::Datetime(v) => v.timestamp().into(),
 			_ => BigDecimal::default(),
 		}
 	}
@@ -584,8 +575,8 @@ impl Value {
 			Value::True => Number::from(1),
 			Value::Number(v) => v,
 			Value::Strand(v) => Number::from(v.as_str()),
-			Value::Duration(v) => v.value.as_secs().into(),
-			Value::Datetime(v) => v.value.timestamp().into(),
+			Value::Duration(v) => v.as_secs().into(),
+			Value::Datetime(v) => v.timestamp().into(),
 			_ => Number::default(),
 		}
 	}
@@ -613,6 +604,13 @@ impl Value {
 		}
 	}
 
+	pub fn as_string(self) -> String {
+		match self {
+			Value::Strand(v) => v.as_string(),
+			_ => self.to_string(),
+		}
+	}
+
 	// -----------------------------------
 	// Expensive conversion of value
 	// -----------------------------------
@@ -622,8 +620,8 @@ impl Value {
 			Value::True => Number::from(1),
 			Value::Number(v) => v.clone(),
 			Value::Strand(v) => Number::from(v.as_str()),
-			Value::Duration(v) => v.value.as_secs().into(),
-			Value::Datetime(v) => v.value.timestamp().into(),
+			Value::Duration(v) => v.as_secs().into(),
+			Value::Datetime(v) => v.timestamp().into(),
 			_ => Number::default(),
 		}
 	}
@@ -653,7 +651,7 @@ impl Value {
 
 	pub fn to_idiom(&self) -> Idiom {
 		self.to_strand()
-			.value
+			.as_str()
 			.trim_start_matches('/')
 			.split(&['.', '/'][..])
 			.map(Part::from)
@@ -831,14 +829,14 @@ impl Value {
 
 	pub fn all_equal(&self, other: &Value) -> bool {
 		match self {
-			Value::Array(v) => v.value.iter().all(|v| v.equal(other)),
+			Value::Array(v) => v.iter().all(|v| v.equal(other)),
 			_ => self.equal(other),
 		}
 	}
 
 	pub fn any_equal(&self, other: &Value) -> bool {
 		match self {
-			Value::Array(v) => v.value.iter().any(|v| v.equal(other)),
+			Value::Array(v) => v.iter().any(|v| v.equal(other)),
 			_ => self.equal(other),
 		}
 	}
@@ -847,7 +845,7 @@ impl Value {
 		match self {
 			Value::Strand(v) => match other {
 				Value::Strand(w) => MATCHER.fuzzy_match(v.as_str(), w.as_str()).is_some(),
-				_ => MATCHER.fuzzy_match(v.as_str(), other.to_strand().as_str()).is_some(),
+				_ => MATCHER.fuzzy_match(v.as_str(), other.to_string().as_str()).is_some(),
 			},
 			_ => self.equal(other),
 		}
@@ -855,24 +853,24 @@ impl Value {
 
 	pub fn all_fuzzy(&self, other: &Value) -> bool {
 		match self {
-			Value::Array(v) => v.value.iter().all(|v| v.fuzzy(other)),
+			Value::Array(v) => v.iter().all(|v| v.fuzzy(other)),
 			_ => self.fuzzy(other),
 		}
 	}
 
 	pub fn any_fuzzy(&self, other: &Value) -> bool {
 		match self {
-			Value::Array(v) => v.value.iter().any(|v| v.fuzzy(other)),
+			Value::Array(v) => v.iter().any(|v| v.fuzzy(other)),
 			_ => self.fuzzy(other),
 		}
 	}
 
 	pub fn contains(&self, other: &Value) -> bool {
 		match self {
-			Value::Array(v) => v.value.iter().any(|v| v.equal(other)),
+			Value::Array(v) => v.iter().any(|v| v.equal(other)),
 			Value::Strand(v) => match other {
-				Value::Strand(w) => v.value.contains(w.as_str()),
-				_ => v.value.contains(&other.to_strand().as_str()),
+				Value::Strand(w) => v.contains(w.as_str()),
+				_ => v.contains(&other.to_string().as_str()),
 			},
 			Value::Geometry(v) => match other {
 				Value::Geometry(w) => v.contains(w),
@@ -884,8 +882,8 @@ impl Value {
 
 	pub fn contains_all(&self, other: &Value) -> bool {
 		match other {
-			Value::Array(v) => v.value.iter().all(|v| match self {
-				Value::Array(w) => w.value.iter().any(|w| v.equal(w)),
+			Value::Array(v) => v.iter().all(|v| match self {
+				Value::Array(w) => w.iter().any(|w| v.equal(w)),
 				Value::Geometry(_) => self.contains(v),
 				_ => false,
 			}),
@@ -895,8 +893,8 @@ impl Value {
 
 	pub fn contains_any(&self, other: &Value) -> bool {
 		match other {
-			Value::Array(v) => v.value.iter().any(|v| match self {
-				Value::Array(w) => w.value.iter().any(|w| v.equal(w)),
+			Value::Array(v) => v.iter().any(|v| match self {
+				Value::Array(w) => w.iter().any(|w| v.equal(w)),
 				Value::Geometry(_) => self.contains(v),
 				_ => false,
 			}),
@@ -920,27 +918,21 @@ impl Value {
 
 	pub fn lexical_cmp(&self, other: &Value) -> Option<Ordering> {
 		match (self, other) {
-			(Value::Strand(a), Value::Strand(b)) => {
-				Some(lexical_sort::lexical_cmp(&a.value, &b.value))
-			}
+			(Value::Strand(a), Value::Strand(b)) => Some(lexical_sort::lexical_cmp(a, b)),
 			_ => self.partial_cmp(other),
 		}
 	}
 
 	pub fn natural_cmp(&self, other: &Value) -> Option<Ordering> {
 		match (self, other) {
-			(Value::Strand(a), Value::Strand(b)) => {
-				Some(lexical_sort::natural_cmp(&a.value, &b.value))
-			}
+			(Value::Strand(a), Value::Strand(b)) => Some(lexical_sort::natural_cmp(a, b)),
 			_ => self.partial_cmp(other),
 		}
 	}
 
 	pub fn natural_lexical_cmp(&self, other: &Value) -> Option<Ordering> {
 		match (self, other) {
-			(Value::Strand(a), Value::Strand(b)) => {
-				Some(lexical_sort::natural_lexical_cmp(&a.value, &b.value))
-			}
+			(Value::Strand(a), Value::Strand(b)) => Some(lexical_sort::natural_lexical_cmp(a, b)),
 			_ => self.partial_cmp(other),
 		}
 	}
@@ -1321,6 +1313,24 @@ mod tests {
 		assert_eq!(Strand::from("true"), Value::from("true").as_strand());
 		assert_eq!(Strand::from("false"), Value::from("false").as_strand());
 		assert_eq!(Strand::from("something"), Value::from("something").as_strand());
+	}
+
+	#[test]
+	fn convert_string() {
+		assert_eq!(String::from("NONE"), Value::None.as_string());
+		assert_eq!(String::from("NULL"), Value::Null.as_string());
+		assert_eq!(String::from("VOID"), Value::Void.as_string());
+		assert_eq!(String::from("true"), Value::True.as_string());
+		assert_eq!(String::from("false"), Value::False.as_string());
+		assert_eq!(String::from("0"), Value::from(0).as_string());
+		assert_eq!(String::from("1"), Value::from(1).as_string());
+		assert_eq!(String::from("-1"), Value::from(-1).as_string());
+		assert_eq!(String::from("1.1"), Value::from(1.1).as_string());
+		assert_eq!(String::from("-1.1"), Value::from(-1.1).as_string());
+		assert_eq!(String::from("3"), Value::from("3").as_string());
+		assert_eq!(String::from("true"), Value::from("true").as_string());
+		assert_eq!(String::from("false"), Value::from("false").as_string());
+		assert_eq!(String::from("something"), Value::from("something").as_string());
 	}
 
 	#[test]

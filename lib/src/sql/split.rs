@@ -13,15 +13,6 @@ use std::ops::Deref;
 #[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Splits(pub Vec<Split>);
 
-impl Splits {
-	pub fn len(&self) -> usize {
-		self.0.len()
-	}
-	pub fn is_empty(&self) -> bool {
-		self.0.is_empty()
-	}
-}
-
 impl Deref for Splits {
 	type Target = Vec<Split>;
 	fn deref(&self) -> &Self::Target {
@@ -48,13 +39,18 @@ impl fmt::Display for Splits {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
-pub struct Split {
-	pub split: Idiom,
+pub struct Split(pub Idiom);
+
+impl Deref for Split {
+	type Target = Idiom;
+	fn deref(&self) -> &Self::Target {
+		&self.0
+	}
 }
 
 impl fmt::Display for Split {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "{}", self.split)
+		write!(f, "{}", self.0)
 	}
 }
 
@@ -68,12 +64,7 @@ pub fn split(i: &str) -> IResult<&str, Splits> {
 
 fn split_raw(i: &str) -> IResult<&str, Split> {
 	let (i, v) = basic(i)?;
-	Ok((
-		i,
-		Split {
-			split: v,
-		},
-	))
+	Ok((i, Split(v)))
 }
 
 #[cfg(test)]
@@ -88,12 +79,7 @@ mod tests {
 		let res = split(sql);
 		assert!(res.is_ok());
 		let out = res.unwrap().1;
-		assert_eq!(
-			out,
-			Splits(vec![Split {
-				split: Idiom::parse("field")
-			}])
-		);
+		assert_eq!(out, Splits(vec![Split(Idiom::parse("field"))]),);
 		assert_eq!("SPLIT ON field", format!("{}", out));
 	}
 
@@ -103,12 +89,7 @@ mod tests {
 		let res = split(sql);
 		assert!(res.is_ok());
 		let out = res.unwrap().1;
-		assert_eq!(
-			out,
-			Splits(vec![Split {
-				split: Idiom::parse("field")
-			}])
-		);
+		assert_eq!(out, Splits(vec![Split(Idiom::parse("field"))]),);
 		assert_eq!("SPLIT ON field", format!("{}", out));
 	}
 
@@ -120,14 +101,7 @@ mod tests {
 		let out = res.unwrap().1;
 		assert_eq!(
 			out,
-			Splits(vec![
-				Split {
-					split: Idiom::parse("field")
-				},
-				Split {
-					split: Idiom::parse("other.field")
-				},
-			])
+			Splits(vec![Split(Idiom::parse("field")), Split(Idiom::parse("other.field")),])
 		);
 		assert_eq!("SPLIT ON field, other.field", format!("{}", out));
 	}

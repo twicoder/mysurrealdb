@@ -110,7 +110,7 @@ impl Iterator {
 	// Create a new record for processing
 	pub fn produce(&mut self, val: Table) {
 		self.prepare(Value::Thing(Thing {
-			tb: val.name,
+			tb: val.0,
 			id: Id::rand(),
 		}))
 	}
@@ -165,15 +165,15 @@ impl Iterator {
 				// Loop over each value
 				for obj in &res {
 					// Get the value at the path
-					let val = obj.pick(&split.split);
+					let val = obj.pick(split);
 					// Set the value at the path
 					match val {
 						Value::Array(v) => {
-							for val in v.value {
+							for val in v {
 								// Make a copy of object
 								let mut obj = obj.clone();
 								// Set the value at the path
-								obj.set(ctx, opt, txn, &split.split, val).await?;
+								obj.set(ctx, opt, txn, split, val).await?;
 								// Add the object to the results
 								self.results.push(obj);
 							}
@@ -182,7 +182,7 @@ impl Iterator {
 							// Make a copy of object
 							let mut obj = obj.clone();
 							// Set the value at the path
-							obj.set(ctx, opt, txn, &split.split, val).await?;
+							obj.set(ctx, opt, txn, split, val).await?;
 							// Add the object to the results
 							self.results.push(obj);
 						}
@@ -213,13 +213,13 @@ impl Iterator {
 					// Loop over each group clause
 					for group in groups.iter() {
 						// Get the value at the path
-						let val = obj.pick(&group.group);
+						let val = obj.pick(group);
 						// Set the value at the path
-						arr.value.push(val);
+						arr.push(val);
 					}
 					// Add to grouped collection
 					match grp.get_mut(&arr) {
-						Some(v) => v.value.push(obj),
+						Some(v) => v.push(obj),
 						None => {
 							grp.insert(arr, Array::from(obj));
 						}
@@ -351,24 +351,24 @@ impl Iterator {
 				// Loop over each value
 				for obj in &mut self.results {
 					// Get the value at the path
-					let val = obj.get(ctx, opt, txn, &fetch.fetch).await?;
+					let val = obj.get(ctx, opt, txn, fetch).await?;
 					// Set the value at the path
 					match val {
 						Value::Array(v) => {
 							// Fetch all remote records
 							let val = Value::Array(v).get(ctx, opt, txn, &[Part::All]).await?;
 							// Set the value at the path
-							obj.set(ctx, opt, txn, &fetch.fetch, val).await?;
+							obj.set(ctx, opt, txn, fetch, val).await?;
 						}
 						Value::Thing(v) => {
 							// Fetch all remote records
 							let val = Value::Thing(v).get(ctx, opt, txn, &[Part::All]).await?;
 							// Set the value at the path
-							obj.set(ctx, opt, txn, &fetch.fetch, val).await?;
+							obj.set(ctx, opt, txn, fetch, val).await?;
 						}
 						_ => {
 							// Set the value at the path
-							obj.set(ctx, opt, txn, &fetch.fetch, val).await?;
+							obj.set(ctx, opt, txn, fetch, val).await?;
 						}
 					}
 				}

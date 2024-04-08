@@ -9,25 +9,25 @@ impl Value {
 		match (self, val) {
 			(Value::Object(a), Value::Object(b)) if a != b => {
 				// Loop over old keys
-				for (key, _) in a.value.iter() {
-					if !b.value.contains_key(key) {
+				for (key, _) in a.iter() {
+					if !b.contains_key(key) {
 						ops.push(Operation {
 							op: Op::Remove,
-							path: path.clone().add(key.clone().into()),
+							path: path.clone().push(key.clone().into()),
 							value: Value::Null,
 						})
 					}
 				}
 				// Loop over new keys
-				for (key, val) in b.value.iter() {
-					match a.value.get(key) {
+				for (key, val) in b.iter() {
+					match a.get(key) {
 						None => ops.push(Operation {
 							op: Op::Add,
-							path: path.clone().add(key.clone().into()),
+							path: path.clone().push(key.clone().into()),
 							value: val.clone(),
 						}),
 						Some(old) => {
-							let path = path.clone().add(key.clone().into());
+							let path = path.clone().push(key.clone().into());
 							ops.append(&mut old.diff(val, path))
 						}
 					}
@@ -36,16 +36,16 @@ impl Value {
 			(Value::Array(a), Value::Array(b)) if a != b => {
 				let mut n = 0;
 				while n < min(a.len(), b.len()) {
-					let path = path.clone().add(n.into());
-					ops.append(&mut a.value[n].diff(&b.value[n], path));
+					let path = path.clone().push(n.into());
+					ops.append(&mut a[n].diff(&b[n], path));
 					n += 1;
 				}
 				while n < b.len() {
 					if n >= a.len() {
 						ops.push(Operation {
 							op: Op::Add,
-							path: path.clone().add(n.into()),
-							value: b.value[n].clone(),
+							path: path.clone().push(n.into()),
+							value: b[n].clone(),
 						})
 					}
 					n += 1;
@@ -54,7 +54,7 @@ impl Value {
 					if n >= b.len() {
 						ops.push(Operation {
 							op: Op::Remove,
-							path: path.clone().add(n.into()),
+							path: path.clone().push(n.into()),
 							value: Value::Null,
 						})
 					}
@@ -66,7 +66,7 @@ impl Value {
 				path,
 				value: {
 					let mut dmp = dmp::new();
-					let mut pch = dmp.patch_make1(&a.value, &b.value);
+					let mut pch = dmp.patch_make1(a, b);
 					let txt = dmp.patch_to_text(&mut pch);
 					txt.into()
 				},

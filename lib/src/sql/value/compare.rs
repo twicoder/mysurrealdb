@@ -16,7 +16,7 @@ impl Value {
 			Some(p) => match (self, other) {
 				// Current path part is an object
 				(Value::Object(a), Value::Object(b)) => match p {
-					Part::Field(f) => match (a.value.get(&f.name), b.value.get(&f.name)) {
+					Part::Field(f) => match (a.get(f as &str), b.get(f as &str)) {
 						(Some(a), Some(b)) => a.compare(b, path.next(), collate, numeric),
 						(Some(_), None) => Some(Ordering::Greater),
 						(None, Some(_)) => Some(Ordering::Less),
@@ -27,7 +27,7 @@ impl Value {
 				// Current path part is an array
 				(Value::Array(a), Value::Array(b)) => match p {
 					Part::All => {
-						for (a, b) in a.value.iter().zip(b.value.iter()) {
+						for (a, b) in a.iter().zip(b.iter()) {
 							match a.compare(b, path.next(), collate, numeric) {
 								Some(Ordering::Equal) => continue,
 								None => continue,
@@ -40,28 +40,26 @@ impl Value {
 							_ => Some(Ordering::Equal),
 						}
 					}
-					Part::First => match (a.value.first(), b.value.first()) {
+					Part::First => match (a.first(), b.first()) {
 						(Some(a), Some(b)) => a.compare(b, path.next(), collate, numeric),
 						(Some(_), None) => Some(Ordering::Greater),
 						(None, Some(_)) => Some(Ordering::Less),
 						(_, _) => Some(Ordering::Equal),
 					},
-					Part::Last => match (a.value.first(), b.value.first()) {
+					Part::Last => match (a.first(), b.first()) {
 						(Some(a), Some(b)) => a.compare(b, path.next(), collate, numeric),
 						(Some(_), None) => Some(Ordering::Greater),
 						(None, Some(_)) => Some(Ordering::Less),
 						(_, _) => Some(Ordering::Equal),
 					},
-					Part::Index(i) => {
-						match (a.value.get(i.to_usize()), b.value.get(i.to_usize())) {
-							(Some(a), Some(b)) => a.compare(b, path.next(), collate, numeric),
-							(Some(_), None) => Some(Ordering::Greater),
-							(None, Some(_)) => Some(Ordering::Less),
-							(_, _) => Some(Ordering::Equal),
-						}
-					}
+					Part::Index(i) => match (a.get(i.to_usize()), b.get(i.to_usize())) {
+						(Some(a), Some(b)) => a.compare(b, path.next(), collate, numeric),
+						(Some(_), None) => Some(Ordering::Greater),
+						(None, Some(_)) => Some(Ordering::Less),
+						(_, _) => Some(Ordering::Equal),
+					},
 					_ => {
-						for (a, b) in a.value.iter().zip(b.value.iter()) {
+						for (a, b) in a.iter().zip(b.iter()) {
 							match a.compare(b, path, collate, numeric) {
 								Some(Ordering::Equal) => continue,
 								None => continue,

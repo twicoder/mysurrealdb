@@ -24,12 +24,12 @@ impl Value {
 			Some(p) => match self {
 				// Current path part is an object
 				Value::Object(v) => match p {
-					Part::Field(f) => match v.value.get_mut(&f.name) {
+					Part::Field(f) => match v.get_mut(f as &str) {
 						Some(v) if v.is_some() => v.set(ctx, opt, txn, path.next(), val).await,
 						_ => {
 							let mut obj = Value::base();
 							obj.set(ctx, opt, txn, path.next(), val).await?;
-							v.insert(&f.name, obj);
+							v.insert(f.to_string(), obj);
 							Ok(())
 						}
 					},
@@ -39,26 +39,25 @@ impl Value {
 				Value::Array(v) => match p {
 					Part::All => {
 						let path = path.next();
-						let futs =
-							v.value.iter_mut().map(|v| v.set(ctx, opt, txn, path, val.clone()));
+						let futs = v.iter_mut().map(|v| v.set(ctx, opt, txn, path, val.clone()));
 						try_join_all(futs).await?;
 						Ok(())
 					}
-					Part::First => match v.value.first_mut() {
+					Part::First => match v.first_mut() {
 						Some(v) => v.set(ctx, opt, txn, path.next(), val).await,
 						None => Ok(()),
 					},
-					Part::Last => match v.value.last_mut() {
+					Part::Last => match v.last_mut() {
 						Some(v) => v.set(ctx, opt, txn, path.next(), val).await,
 						None => Ok(()),
 					},
-					Part::Index(i) => match v.value.get_mut(i.to_usize()) {
+					Part::Index(i) => match v.get_mut(i.to_usize()) {
 						Some(v) => v.set(ctx, opt, txn, path.next(), val).await,
 						None => Ok(()),
 					},
 					Part::Where(w) => {
 						let path = path.next();
-						for v in &mut v.value {
+						for v in v.iter_mut() {
 							if w.compute(ctx, opt, txn, Some(v)).await?.is_truthy() {
 								v.set(ctx, opt, txn, path, val.clone()).await?;
 							}
@@ -66,8 +65,7 @@ impl Value {
 						Ok(())
 					}
 					_ => {
-						let futs =
-							v.value.iter_mut().map(|v| v.set(ctx, opt, txn, path, val.clone()));
+						let futs = v.iter_mut().map(|v| v.set(ctx, opt, txn, path, val.clone()));
 						try_join_all(futs).await?;
 						Ok(())
 					}

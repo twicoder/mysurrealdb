@@ -1,12 +1,12 @@
 use crate::ctx::Context;
-use crate::dbs::response::{Response, Responses};
+use crate::dbs::response::Response;
 use crate::dbs::Auth;
 use crate::dbs::Level;
 use crate::dbs::Options;
 use crate::dbs::Runtime;
 use crate::dbs::Transaction;
 use crate::err::Error;
-use crate::kvs::Store;
+use crate::kvs::Datastore;
 use crate::sql::query::Query;
 use crate::sql::statement::Statement;
 use crate::sql::value::Value;
@@ -14,14 +14,14 @@ use futures::lock::Mutex;
 use std::sync::Arc;
 use trice::Instant;
 
-pub struct Executor {
+pub struct Executor<'a> {
 	err: bool,
-	kvs: Store,
+	kvs: &'a Datastore,
 	txn: Option<Transaction>,
 }
 
-impl Executor {
-	pub fn new(kvs: Store) -> Executor {
+impl<'a> Executor<'a> {
+	pub fn new(kvs: &'a Datastore) -> Executor<'a> {
 		Executor {
 			kvs,
 			txn: None,
@@ -120,13 +120,13 @@ impl Executor {
 		mut ctx: Runtime,
 		mut opt: Options,
 		qry: Query,
-	) -> Result<Responses, Error> {
+	) -> Result<Vec<Response>, Error> {
 		// Initialise buffer of responses
 		let mut buf: Vec<Response> = vec![];
 		// Initialise array of responses
 		let mut out: Vec<Response> = vec![];
 		// Process all statements in query
-		for stm in qry.statements().iter() {
+		for stm in qry.iter() {
 			// Log the statement
 			debug!("Executing: {}", stm);
 			// Reset errors
@@ -142,7 +142,7 @@ impl Executor {
 					// Allowed to run?
 					opt.check(Level::Db)?;
 					// Process the option
-					match &stm.name.name.to_uppercase()[..] {
+					match &stm.name.to_uppercase()[..] {
 						"FIELDS" => opt = opt.fields(stm.what),
 						"EVENTS" => opt = opt.events(stm.what),
 						"TABLES" => opt = opt.tables(stm.what),
@@ -233,23 +233,26 @@ impl Executor {
 					false => {
 						// Create a transaction
 						let loc = self.begin().await;
-						// Specify statement timeout
-						if let Some(timeout) = stm.timeout() {
-							let mut new = Context::new(&ctx);
-							new.add_timeout(timeout);
-							ctx = new.freeze();
-						}
 						// Process the statement
-						let res = stm.compute(&ctx, &opt, &self.txn(), None).await;
-						// Catch statement timeout
 						let res = match stm.timeout() {
-							Some(timeout) => match ctx.is_timedout() {
-								true => Err(Error::QueryTimeout {
-									timer: timeout,
-								}),
-								false => res,
-							},
-							None => res,
+							// There is a timeout clause
+							Some(timeout) => {
+								// Set statement timeout
+								let mut ctx = Context::new(&ctx);
+								ctx.add_timeout(timeout);
+								let ctx = ctx.freeze();
+								// Process the statement
+								let res = stm.compute(&ctx, &opt, &self.txn(), None).await;
+								// Catch statement timeout
+								match ctx.is_timedout() {
+									true => Err(Error::QueryTimeout {
+										timer: timeout,
+									}),
+									false => res,
+								}
+							}
+							// There is no timeout clause
+							None => stm.compute(&ctx, &opt, &self.txn(), None).await,
 						};
 						// Finalise transaction
 						match &res {
