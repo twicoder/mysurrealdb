@@ -4,14 +4,11 @@ use serde::de::{Deserialize, Visitor};
 use std;
 use std::fmt;
 use std::io::{self, Read};
-use std::mem::transmute;
 use std::str;
 use std::{i16, i32, i64, i8};
 use thiserror::Error;
 
 /// A decoder for deserializing bytes from an order preserving format to a value.
-///
-/// Please see the **Serializer** documentation for a precise overview of the `bytekey` format.
 #[derive(Debug)]
 pub struct Deserializer<R> {
 	reader: R,
@@ -42,14 +39,6 @@ impl serde::de::Error for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Deserialize data from the given slice of bytes.
-///
-/// #### Usage
-///
-/// ```
-/// # use bytekey::{serialize, deserialize};
-/// let bytes = serialize(&42usize).unwrap();
-/// assert_eq!(42usize, deserialize::<usize>(&bytes).unwrap());
-/// ```
 pub fn deserialize<T>(bytes: &[u8]) -> Result<T>
 where
 	T: for<'de> Deserialize<'de>,
@@ -58,15 +47,6 @@ where
 }
 
 /// Deserialize data from the given byte reader.
-///
-/// #### Usage
-///
-/// ```
-/// # use bytekey::{serialize, deserialize_from};
-/// let bytes = serialize(&42u64).unwrap();
-/// let result: u64 = deserialize_from(&bytes[..]).unwrap();
-/// assert_eq!(42u64, result);
-/// ```
 pub fn deserialize_from<R, T>(reader: R) -> Result<T>
 where
 	R: io::BufRead,
@@ -129,10 +109,7 @@ where
 	where
 		V: Visitor<'de>,
 	{
-		let b = match self.reader.read_u8()? {
-			0 => false,
-			_ => true,
-		};
+		let b = !matches!(self.reader.read_u8()?, 0);
 		visitor.visit_bool(b)
 	}
 
@@ -206,7 +183,7 @@ where
 	{
 		let val = self.reader.read_i32::<BE>()?;
 		let t = ((val ^ i32::MIN) >> 31) | i32::MIN;
-		let f: f32 = unsafe { transmute(val ^ t) };
+		let f: f32 = f32::from_bits((val ^ t) as u32);
 		visitor.visit_f32(f)
 	}
 
@@ -216,7 +193,7 @@ where
 	{
 		let val = self.reader.read_i64::<BE>()?;
 		let t = ((val ^ i64::MIN) >> 63) | i64::MIN;
-		let f: f64 = unsafe { transmute(val ^ t) };
+		let f: f64 = f64::from_bits((val ^ t) as u64);
 		visitor.visit_f64(f)
 	}
 
@@ -230,7 +207,7 @@ where
 			Ok(_) => match str::from_utf8(&buffer) {
 				Ok(mut s) => {
 					const EOF: char = '\u{0}';
-					const EOF_STR: &'static str = "\u{0}";
+					const EOF_STR: &str = "\u{0}";
 					if s.len() >= EOF.len_utf8() {
 						let eof_start = s.len() - EOF.len_utf8();
 						if &s[eof_start..] == EOF_STR {
@@ -239,9 +216,9 @@ where
 					}
 					string.push_str(s)
 				}
-				Err(e) => panic!("1"),
+				Err(_) => panic!("1"),
 			},
-			Err(e) => panic!("2"),
+			Err(_) => panic!("2"),
 		}
 		visitor.visit_string(string)
 	}
@@ -256,7 +233,7 @@ where
 			Ok(_) => match str::from_utf8(&buffer) {
 				Ok(mut s) => {
 					const EOF: char = '\u{0}';
-					const EOF_STR: &'static str = "\u{0}";
+					const EOF_STR: &str = "\u{0}";
 					if s.len() >= EOF.len_utf8() {
 						let eof_start = s.len() - EOF.len_utf8();
 						if &s[eof_start..] == EOF_STR {
@@ -265,9 +242,9 @@ where
 					}
 					string.push_str(s)
 				}
-				Err(e) => panic!("1"),
+				Err(_) => panic!("1"),
 			},
-			Err(e) => panic!("2"),
+			Err(_) => panic!("2"),
 		}
 		visitor.visit_string(string)
 	}

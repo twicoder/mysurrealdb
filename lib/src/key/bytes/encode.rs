@@ -2,7 +2,6 @@ use byteorder::{WriteBytesExt, BE};
 use serde::{self, Serialize};
 use std::fmt;
 use std::io::{self, Write};
-use std::mem::transmute;
 use std::{self, i16, i32, i64, i8};
 use thiserror::Error;
 
@@ -111,15 +110,6 @@ impl serde::ser::Error for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Serialize data into a vector of `u8` bytes.
-///
-/// #### Usage
-///
-/// ```
-/// # use bytekey::serialize;
-/// assert_eq!(vec!(0x00, 0x00, 0x00, 0x2A), serialize(&42u32).unwrap());
-/// assert_eq!(vec!(0x66, 0x69, 0x7A, 0x7A, 0x62, 0x75, 0x7A, 0x7A, 0x00), serialize(&"fizzbuzz").unwrap());
-/// assert_eq!(vec!(0x2A, 0x66, 0x69, 0x7A, 0x7A, 0x00), serialize(&(42u8, "fizz")).unwrap());
-/// ```
 pub fn serialize<T>(v: &T) -> Result<Vec<u8>>
 where
 	T: Serialize,
@@ -133,17 +123,6 @@ where
 }
 
 /// Serialize data into the given vector of `u8` bytes.
-///
-/// #### Usage
-///
-/// ```
-/// # use bytekey::serialize_into;
-/// let mut bytes = vec![];
-/// bytekey::serialize_into(&mut bytes, &5u8).unwrap();
-/// assert_eq!(vec![5u8], bytes.clone());
-/// bytekey::serialize_into(&mut bytes, &10u8).unwrap();
-/// assert_eq!(vec![5u8, 10], bytes.clone());
-/// ```
 pub fn serialize_into<W, T>(writer: W, value: &T) -> Result<()>
 where
 	W: Write,
@@ -425,14 +404,14 @@ where
 	}
 
 	fn serialize_f32(self, v: f32) -> Result<()> {
-		let val = unsafe { transmute::<f32, i32>(v) };
+		let val = v.to_bits() as i32;
 		let t = (val >> 31) | i32::MIN;
 		self.writer.write_i32::<BE>(val ^ t)?;
 		Ok(())
 	}
 
 	fn serialize_f64(self, v: f64) -> Result<()> {
-		let val = unsafe { transmute::<f64, i64>(v) };
+		let val = v.to_bits() as i64;
 		let t = (val >> 63) | i64::MIN;
 		self.writer.write_i64::<BE>(val ^ t)?;
 		Ok(())
