@@ -25,6 +25,8 @@ pub struct Options {
 	pub debug: bool,
 	// Should we force tables/events to re-run?
 	pub force: bool,
+	// Should we run permissions checks?
+	pub perms: bool,
 	// Should we process field queries?
 	pub fields: bool,
 	// Should we process event queries?
@@ -48,6 +50,7 @@ impl Options {
 			ns: None,
 			db: None,
 			dive: 0,
+			perms: true,
 			debug: false,
 			force: false,
 			fields: true,
@@ -108,6 +111,17 @@ impl Options {
 	}
 
 	// Create a new Options object for a subquery
+	pub fn perms(&self, v: bool) -> Options {
+		Options {
+			auth: self.auth.clone(),
+			ns: self.ns.clone(),
+			db: self.db.clone(),
+			perms: v,
+			..*self
+		}
+	}
+
+	// Create a new Options object for a subquery
 	pub fn fields(&self, v: bool) -> Options {
 		Options {
 			auth: self.auth.clone(),
@@ -146,9 +160,9 @@ impl Options {
 			auth: self.auth.clone(),
 			ns: self.ns.clone(),
 			db: self.db.clone(),
-			fields: v,
-			events: v,
-			tables: v,
+			fields: !v,
+			events: !v,
+			tables: !v,
 			..*self
 		}
 	}
