@@ -102,7 +102,7 @@ impl Function {
 }
 
 impl Function {
-	pub async fn compute(
+	pub(crate) async fn compute(
 		&self,
 		ctx: &Runtime,
 		opt: &Options,
@@ -366,7 +366,6 @@ fn function_rand(i: &str) -> IResult<&str, &str> {
 fn function_string(i: &str) -> IResult<&str, &str> {
 	alt((
 		tag("string::concat"),
-		tag("string::contains"),
 		tag("string::endsWith"),
 		tag("string::join"),
 		tag("string::length"),
@@ -378,7 +377,6 @@ fn function_string(i: &str) -> IResult<&str, &str> {
 		tag("string::slug"),
 		tag("string::split"),
 		tag("string::startsWith"),
-		tag("string::substr"),
 		tag("string::trim"),
 		tag("string::uppercase"),
 		tag("string::words"),
@@ -387,8 +385,6 @@ fn function_string(i: &str) -> IResult<&str, &str> {
 
 fn function_time(i: &str) -> IResult<&str, &str> {
 	alt((
-		tag("time::add"),
-		tag("time::age"),
 		tag("time::day"),
 		tag("time::floor"),
 		tag("time::group"),

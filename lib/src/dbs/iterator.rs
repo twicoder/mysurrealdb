@@ -288,10 +288,18 @@ impl Iterator {
 				// Loop over each order clause
 				for order in orders.iter() {
 					// Reverse the ordering if DESC
-					let o = match order.direction {
-						true => a.compare(b, &order.order),
-						false => b.compare(a, &order.order),
+					let o = match order.random {
+						true => {
+							let a = rand::random::<f64>();
+							let b = rand::random::<f64>();
+							a.partial_cmp(&b)
+						}
+						false => match order.direction {
+							true => a.compare(b, &order.order, order.collate, order.numeric),
+							false => b.compare(a, &order.order, order.collate, order.numeric),
+						},
 					};
+					//
 					match o {
 						Some(Ordering::Greater) => return Ordering::Greater,
 						Some(Ordering::Equal) => continue,

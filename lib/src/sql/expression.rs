@@ -29,7 +29,7 @@ impl Default for Expression {
 
 impl Expression {
 	// Create a new expression
-	pub fn new(l: Value, o: Operator, r: Value) -> Expression {
+	fn new(l: Value, o: Operator, r: Value) -> Expression {
 		Expression {
 			l,
 			o,
@@ -37,7 +37,7 @@ impl Expression {
 		}
 	}
 	// Augment an existing expression
-	pub fn augment(mut self, l: Value, o: Operator) -> Expression {
+	fn augment(mut self, l: Value, o: Operator) -> Expression {
 		if o.precedence() >= self.o.precedence() {
 			match self.l {
 				Value::Expression(x) => {
@@ -57,7 +57,7 @@ impl Expression {
 }
 
 impl Expression {
-	pub async fn compute(
+	pub(crate) async fn compute(
 		&self,
 		ctx: &Runtime,
 		opt: &Options,
@@ -109,6 +109,7 @@ impl Expression {
 			Operator::AllInside => fnc::operate::inside_all(&l, &r),
 			Operator::AnyInside => fnc::operate::inside_any(&l, &r),
 			Operator::NoneInside => fnc::operate::inside_none(&l, &r),
+			Operator::Outside => fnc::operate::outside(&l, &r),
 			Operator::Intersects => fnc::operate::intersects(&l, &r),
 			_ => unreachable!(),
 		}
