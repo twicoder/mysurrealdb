@@ -1,118 +1,65 @@
 use crate::dbs::DB;
 use crate::err::Error;
-use crate::net::head;
+use crate::net::input::bytes_to_utf8;
 use crate::net::output;
-use crate::net::session;
+use crate::net::params::Params;
+use axum::extract::{DefaultBodyLimit, Path};
+use axum::response::IntoResponse;
+use axum::routing::options;
+use axum::{Extension, Router, TypedHeader};
+use axum_extra::extract::Query;
 use bytes::Bytes;
+use http_body::Body as HttpBody;
 use serde::Deserialize;
 use std::str;
+use surrealdb::dbs::Session;
 use surrealdb::sql::Value;
-use surrealdb::Session;
-use warp::path;
-use warp::Filter;
+use tower_http::limit::RequestBodyLimitLayer;
 
-const MAX: u64 = 1024 * 16; // 16 KiB
+use super::headers::Accept;
+
+const MAX: usize = 1024 * 16; // 16 KiB
 
 #[derive(Default, Deserialize, Debug, Clone)]
-struct Query {
-	pub limit: Option<String>,
-	pub start: Option<String>,
+struct QueryOptions {
+	pub limit: Option<i64>,
+	pub start: Option<i64>,
+	pub fields: Option<Vec<String>>,
 }
 
-pub fn config() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-	// ------------------------------
-	// Routes for OPTIONS
-	// ------------------------------
-
-	let base = warp::path("key");
-	// Set opts method
-	let opts = base.and(warp::options()).map(warp::reply);
-
-	// ------------------------------
-	// Routes for a table
-	// ------------------------------
-
-	// Set select method
-	let select = warp::any()
-		.and(warp::get())
-		.and(session::build())
-		.and(warp::header::<String>(http::header::CONTENT_TYPE.as_str()))
-		.and(path!("key" / String).and(warp::path::end()))
-		.and(warp::query())
-		.and_then(select_all);
-	// Set create method
-	let create = warp::any()
-		.and(warp::post())
-		.and(session::build())
-		.and(warp::header::<String>(http::header::CONTENT_TYPE.as_str()))
-		.and(path!("key" / String).and(warp::path::end()))
-		.and(warp::body::content_length_limit(MAX))
-		.and(warp::body::bytes())
-		.and_then(create_all);
-	// Set delete method
-	let delete = warp::any()
-		.and(warp::delete())
-		.and(session::build())
-		.and(warp::header::<String>(http::header::CONTENT_TYPE.as_str()))
-		.and(path!("key" / String).and(warp::path::end()))
-		.and_then(delete_all);
-	// Specify route
-	let all = select.or(create).or(delete);
-
-	// ------------------------------
-	// Routes for a thing
-	// ------------------------------
-
-	// Set select method
-	let select = warp::any()
-		.and(warp::get())
-		.and(session::build())
-		.and(warp::header::<String>(http::header::CONTENT_TYPE.as_str()))
-		.and(path!("key" / String / String).and(warp::path::end()))
-		.and_then(select_one);
-	// Set create method
-	let create = warp::any()
-		.and(warp::post())
-		.and(session::build())
-		.and(warp::header::<String>(http::header::CONTENT_TYPE.as_str()))
-		.and(path!("key" / String / String).and(warp::path::end()))
-		.and(warp::body::content_length_limit(MAX))
-		.and(warp::body::bytes())
-		.and_then(create_one);
-	// Set update method
-	let update = warp::any()
-		.and(warp::put())
-		.and(session::build())
-		.and(warp::header::<String>(http::header::CONTENT_TYPE.as_str()))
-		.and(path!("key" / String / String).and(warp::path::end()))
-		.and(warp::body::content_length_limit(MAX))
-		.and(warp::body::bytes())
-		.and_then(update_one);
-	// Set modify method
-	let modify = warp::any()
-		.and(warp::patch())
-		.and(session::build())
-		.and(warp::header::<String>(http::header::CONTENT_TYPE.as_str()))
-		.and(path!("key" / String / String).and(warp::path::end()))
-		.and(warp::body::content_length_limit(MAX))
-		.and(warp::body::bytes())
-		.and_then(modify_one);
-	// Set delete method
-	let delete = warp::any()
-		.and(warp::delete())
-		.and(session::build())
-		.and(warp::header::<String>(http::header::CONTENT_TYPE.as_str()))
-		.and(path!("key" / String / String).and(warp::path::end()))
-		.and_then(delete_one);
-	// Specify route
-	let one = select.or(create).or(update).or(modify).or(delete);
-
-	// ------------------------------
-	// All routes
-	// ------------------------------
-
-	// Specify route
-	opts.or(all).or(one).with(head::cors())
+pub(super) fn router<S, B>() -> Router<S, B>
+where
+	B: HttpBody + Send + 'static,
+	B::Data: Send,
+	B::Error: std::error::Error + Send + Sync + 'static,
+	S: Clone + Send + Sync + 'static,
+{
+	Router::new()
+		.route(
+			"/key/:table",
+			options(|| async {})
+				.get(select_all)
+				.post(create_all)
+				.put(update_all)
+				.patch(modify_all)
+				.delete(delete_all),
+		)
+		.route_layer(DefaultBodyLimit::disable())
+		.layer(RequestBodyLimitLayer::new(MAX))
+		.merge(
+			Router::new()
+				.route(
+					"/key/:table/:key",
+					options(|| async {})
+						.get(select_one)
+						.post(create_one)
+						.put(update_one)
+						.patch(modify_one)
+						.delete(delete_one),
+				)
+				.route_layer(DefaultBodyLimit::disable())
+				.layer(RequestBodyLimitLayer::new(MAX)),
+		)
 }
 
 // ------------------------------
@@ -120,78 +67,197 @@ pub fn config() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejecti
 // ------------------------------
 
 async fn select_all(
-	session: Session,
-	output: String,
-	table: String,
-	query: Query,
-) -> Result<impl warp::Reply, warp::Rejection> {
+	Extension(session): Extension<Session>,
+	maybe_output: Option<TypedHeader<Accept>>,
+	Path(table): Path<String>,
+	Query(query): Query<QueryOptions>,
+) -> Result<impl IntoResponse, impl IntoResponse> {
+	// Get the datastore reference
 	let db = DB.get().unwrap();
-	let sql = format!(
-		"SELECT * FROM type::table($table) LIMIT {l} START {s}",
-		l = query.limit.unwrap_or_else(|| String::from("100")),
-		s = query.start.unwrap_or_else(|| String::from("0")),
-	);
+	// Specify the request statement
+	let sql = match query.fields {
+		None => "SELECT * FROM type::table($table) LIMIT $limit START $start",
+		_ => "SELECT type::fields($fields) FROM type::table($table) LIMIT $limit START $start",
+	};
+	// Specify the request variables
 	let vars = map! {
 		String::from("table") => Value::from(table),
+		String::from("start") => Value::from(query.start.unwrap_or(0)),
+		String::from("limit") => Value::from(query.limit.unwrap_or(100)),
+		String::from("fields") => Value::from(query.fields.unwrap_or_default()),
 	};
-	match db.execute(sql.as_str(), &session, Some(vars)).await {
-		Ok(ref res) => match output.as_ref() {
-			"application/json" => Ok(output::json(res)),
-			"application/cbor" => Ok(output::cbor(res)),
-			"application/msgpack" => Ok(output::pack(&res)),
-			_ => Err(warp::reject::not_found()),
+	// Execute the query and return the result
+	match db.execute(sql, &session, Some(vars)).await {
+		Ok(ref res) => match maybe_output.as_deref() {
+			// Simple serialization
+			Some(Accept::ApplicationJson) => Ok(output::json(&output::simplify(res))),
+			Some(Accept::ApplicationCbor) => Ok(output::cbor(&output::simplify(res))),
+			Some(Accept::ApplicationPack) => Ok(output::pack(&output::simplify(res))),
+			// Internal serialization
+			Some(Accept::Surrealdb) => Ok(output::full(&res)),
+			// An incorrect content-type was requested
+			_ => Err(Error::InvalidType),
 		},
-		Err(err) => Err(warp::reject::custom(Error::from(err))),
+		// There was an error when executing the query
+		Err(err) => Err(Error::from(err)),
 	}
 }
 
 async fn create_all(
-	session: Session,
-	output: String,
-	table: String,
+	Extension(session): Extension<Session>,
+	maybe_output: Option<TypedHeader<Accept>>,
+	Path(table): Path<String>,
+	Query(params): Query<Params>,
 	body: Bytes,
-) -> Result<impl warp::Reply, warp::Rejection> {
+) -> Result<impl IntoResponse, impl IntoResponse> {
+	// Get the datastore reference
 	let db = DB.get().unwrap();
-	let data = str::from_utf8(&body).unwrap();
-	match surrealdb::sql::json(data) {
+	// Convert the HTTP request body
+	let data = bytes_to_utf8(&body)?;
+	// Parse the request body as JSON
+	match surrealdb::sql::value(data) {
 		Ok(data) => {
+			// Specify the request statement
 			let sql = "CREATE type::table($table) CONTENT $data";
+			// Specify the request variables
 			let vars = map! {
 				String::from("table") => Value::from(table),
 				String::from("data") => data,
+				=> params.parse()
 			};
+			// Execute the query and return the result
 			match db.execute(sql, &session, Some(vars)).await {
-				Ok(res) => match output.as_ref() {
-					"application/json" => Ok(output::json(&res)),
-					"application/cbor" => Ok(output::cbor(&res)),
-					"application/msgpack" => Ok(output::pack(&res)),
-					_ => Err(warp::reject::not_found()),
+				Ok(res) => match maybe_output.as_deref() {
+					// Simple serialization
+					Some(Accept::ApplicationJson) => Ok(output::json(&output::simplify(res))),
+					Some(Accept::ApplicationCbor) => Ok(output::cbor(&output::simplify(res))),
+					Some(Accept::ApplicationPack) => Ok(output::pack(&output::simplify(res))),
+					// Internal serialization
+					Some(Accept::Surrealdb) => Ok(output::full(&res)),
+					// An incorrect content-type was requested
+					_ => Err(Error::InvalidType),
 				},
-				Err(err) => Err(warp::reject::custom(Error::from(err))),
+				// There was an error when executing the query
+				Err(err) => Err(Error::from(err)),
 			}
 		}
-		Err(_) => Err(warp::reject::custom(Error::Request)),
+		Err(_) => Err(Error::Request),
+	}
+}
+
+async fn update_all(
+	Extension(session): Extension<Session>,
+	maybe_output: Option<TypedHeader<Accept>>,
+	Path(table): Path<String>,
+	Query(params): Query<Params>,
+	body: Bytes,
+) -> Result<impl IntoResponse, impl IntoResponse> {
+	// Get the datastore reference
+	let db = DB.get().unwrap();
+	// Convert the HTTP request body
+	let data = bytes_to_utf8(&body)?;
+	// Parse the request body as JSON
+	match surrealdb::sql::value(data) {
+		Ok(data) => {
+			// Specify the request statement
+			let sql = "UPDATE type::table($table) CONTENT $data";
+			// Specify the request variables
+			let vars = map! {
+				String::from("table") => Value::from(table),
+				String::from("data") => data,
+				=> params.parse()
+			};
+			// Execute the query and return the result
+			match db.execute(sql, &session, Some(vars)).await {
+				Ok(res) => match maybe_output.as_deref() {
+					// Simple serialization
+					Some(Accept::ApplicationJson) => Ok(output::json(&output::simplify(res))),
+					Some(Accept::ApplicationCbor) => Ok(output::cbor(&output::simplify(res))),
+					Some(Accept::ApplicationPack) => Ok(output::pack(&output::simplify(res))),
+					// Internal serialization
+					Some(Accept::Surrealdb) => Ok(output::full(&res)),
+					// An incorrect content-type was requested
+					_ => Err(Error::InvalidType),
+				},
+				// There was an error when executing the query
+				Err(err) => Err(Error::from(err)),
+			}
+		}
+		Err(_) => Err(Error::Request),
+	}
+}
+
+async fn modify_all(
+	Extension(session): Extension<Session>,
+	maybe_output: Option<TypedHeader<Accept>>,
+	Path(table): Path<String>,
+	Query(params): Query<Params>,
+	body: Bytes,
+) -> Result<impl IntoResponse, impl IntoResponse> {
+	// Get the datastore reference
+	let db = DB.get().unwrap();
+	// Convert the HTTP request body
+	let data = bytes_to_utf8(&body)?;
+	// Parse the request body as JSON
+	match surrealdb::sql::value(data) {
+		Ok(data) => {
+			// Specify the request statement
+			let sql = "UPDATE type::table($table) MERGE $data";
+			// Specify the request variables
+			let vars = map! {
+				String::from("table") => Value::from(table),
+				String::from("data") => data,
+				=> params.parse()
+			};
+			// Execute the query and return the result
+			match db.execute(sql, &session, Some(vars)).await {
+				Ok(res) => match maybe_output.as_deref() {
+					// Simple serialization
+					Some(Accept::ApplicationJson) => Ok(output::json(&output::simplify(res))),
+					Some(Accept::ApplicationCbor) => Ok(output::cbor(&output::simplify(res))),
+					Some(Accept::ApplicationPack) => Ok(output::pack(&output::simplify(res))),
+					// Internal serialization
+					Some(Accept::Surrealdb) => Ok(output::full(&res)),
+					// An incorrect content-type was requested
+					_ => Err(Error::InvalidType),
+				},
+				// There was an error when executing the query
+				Err(err) => Err(Error::from(err)),
+			}
+		}
+		Err(_) => Err(Error::Request),
 	}
 }
 
 async fn delete_all(
-	session: Session,
-	output: String,
-	table: String,
-) -> Result<impl warp::Reply, warp::Rejection> {
+	Extension(session): Extension<Session>,
+	maybe_output: Option<TypedHeader<Accept>>,
+	Path(table): Path<String>,
+	Query(params): Query<Params>,
+) -> Result<impl IntoResponse, impl IntoResponse> {
+	// Get the datastore reference
 	let db = DB.get().unwrap();
-	let sql = "DELETE type::table($table)";
+	// Specify the request statement
+	let sql = "DELETE type::table($table) RETURN BEFORE";
+	// Specify the request variables
 	let vars = map! {
 		String::from("table") => Value::from(table),
+		=> params.parse()
 	};
+	// Execute the query and return the result
 	match db.execute(sql, &session, Some(vars)).await {
-		Ok(res) => match output.as_ref() {
-			"application/json" => Ok(output::json(&res)),
-			"application/cbor" => Ok(output::cbor(&res)),
-			"application/msgpack" => Ok(output::pack(&res)),
-			_ => Err(warp::reject::not_found()),
+		Ok(res) => match maybe_output.as_deref() {
+			// Simple serialization
+			Some(Accept::ApplicationJson) => Ok(output::json(&output::simplify(res))),
+			Some(Accept::ApplicationCbor) => Ok(output::cbor(&output::simplify(res))),
+			Some(Accept::ApplicationPack) => Ok(output::pack(&output::simplify(res))),
+			// Internal serialization
+			Some(Accept::Surrealdb) => Ok(output::full(&res)),
+			// An incorrect content-type was requested
+			_ => Err(Error::InvalidType),
 		},
-		Err(err) => Err(warp::reject::custom(Error::from(err))),
+		// There was an error when executing the query
+		Err(err) => Err(Error::from(err)),
 	}
 }
 
@@ -200,140 +266,222 @@ async fn delete_all(
 // ------------------------------
 
 async fn select_one(
-	session: Session,
-	output: String,
-	table: String,
-	id: String,
-) -> Result<impl warp::Reply, warp::Rejection> {
+	Extension(session): Extension<Session>,
+	maybe_output: Option<TypedHeader<Accept>>,
+	Path((table, id)): Path<(String, String)>,
+	Query(query): Query<QueryOptions>,
+) -> Result<impl IntoResponse, impl IntoResponse> {
+	// Get the datastore reference
 	let db = DB.get().unwrap();
-	let sql = "SELECT * FROM type::thing($table, $id)";
+	// Specify the request statement
+	let sql = match query.fields {
+		None => "SELECT * FROM type::thing($table, $id)",
+		_ => "SELECT type::fields($fields) FROM type::thing($table, $id)",
+	};
+	// Parse the Record ID as a SurrealQL value
+	let rid = match surrealdb::sql::json(&id) {
+		Ok(id) => id,
+		Err(_) => Value::from(id),
+	};
+	// Specify the request variables
 	let vars = map! {
 		String::from("table") => Value::from(table),
-		String::from("id") => Value::from(id),
+		String::from("id") => rid,
+		String::from("fields") => Value::from(query.fields.unwrap_or_default()),
 	};
+	// Execute the query and return the result
 	match db.execute(sql, &session, Some(vars)).await {
-		Ok(res) => match output.as_ref() {
-			"application/json" => Ok(output::json(&res)),
-			"application/cbor" => Ok(output::cbor(&res)),
-			"application/msgpack" => Ok(output::pack(&res)),
-			_ => Err(warp::reject::not_found()),
+		Ok(res) => match maybe_output.as_deref() {
+			// Simple serialization
+			Some(Accept::ApplicationJson) => Ok(output::json(&output::simplify(res))),
+			Some(Accept::ApplicationCbor) => Ok(output::cbor(&output::simplify(res))),
+			Some(Accept::ApplicationPack) => Ok(output::pack(&output::simplify(res))),
+			// Internal serialization
+			Some(Accept::Surrealdb) => Ok(output::full(&res)),
+			// An incorrect content-type was requested
+			_ => Err(Error::InvalidType),
 		},
-		Err(err) => Err(warp::reject::custom(Error::from(err))),
+		// There was an error when executing the query
+		Err(err) => Err(Error::from(err)),
 	}
 }
 
 async fn create_one(
-	session: Session,
-	output: String,
-	table: String,
-	id: String,
+	Extension(session): Extension<Session>,
+	maybe_output: Option<TypedHeader<Accept>>,
+	Query(params): Query<Params>,
+	Path((table, id)): Path<(String, String)>,
 	body: Bytes,
-) -> Result<impl warp::Reply, warp::Rejection> {
+) -> Result<impl IntoResponse, impl IntoResponse> {
+	// Get the datastore reference
 	let db = DB.get().unwrap();
-	let data = str::from_utf8(&body).unwrap();
-	match surrealdb::sql::json(data) {
+	// Convert the HTTP request body
+	let data = bytes_to_utf8(&body)?;
+	// Parse the Record ID as a SurrealQL value
+	let rid = match surrealdb::sql::json(&id) {
+		Ok(id) => id,
+		Err(_) => Value::from(id),
+	};
+	// Parse the request body as JSON
+	match surrealdb::sql::value(data) {
 		Ok(data) => {
+			// Specify the request statement
 			let sql = "CREATE type::thing($table, $id) CONTENT $data";
+			// Specify the request variables
 			let vars = map! {
 				String::from("table") => Value::from(table),
-				String::from("id") => Value::from(id),
+				String::from("id") => rid,
 				String::from("data") => data,
+				=> params.parse()
 			};
+			// Execute the query and return the result
 			match db.execute(sql, &session, Some(vars)).await {
-				Ok(res) => match output.as_ref() {
-					"application/json" => Ok(output::json(&res)),
-					"application/cbor" => Ok(output::cbor(&res)),
-					"application/msgpack" => Ok(output::pack(&res)),
-					_ => Err(warp::reject::not_found()),
+				Ok(res) => match maybe_output.as_deref() {
+					// Simple serialization
+					Some(Accept::ApplicationJson) => Ok(output::json(&output::simplify(res))),
+					Some(Accept::ApplicationCbor) => Ok(output::cbor(&output::simplify(res))),
+					Some(Accept::ApplicationPack) => Ok(output::pack(&output::simplify(res))),
+					// Internal serialization
+					Some(Accept::Surrealdb) => Ok(output::full(&res)),
+					// An incorrect content-type was requested
+					_ => Err(Error::InvalidType),
 				},
-				Err(err) => Err(warp::reject::custom(Error::from(err))),
+				// There was an error when executing the query
+				Err(err) => Err(Error::from(err)),
 			}
 		}
-		Err(_) => Err(warp::reject::custom(Error::Request)),
+		Err(_) => Err(Error::Request),
 	}
 }
 
 async fn update_one(
-	session: Session,
-	output: String,
-	table: String,
-	id: String,
+	Extension(session): Extension<Session>,
+	maybe_output: Option<TypedHeader<Accept>>,
+	Query(params): Query<Params>,
+	Path((table, id)): Path<(String, String)>,
 	body: Bytes,
-) -> Result<impl warp::Reply, warp::Rejection> {
+) -> Result<impl IntoResponse, impl IntoResponse> {
+	// Get the datastore reference
 	let db = DB.get().unwrap();
-	let data = str::from_utf8(&body).unwrap();
-	match surrealdb::sql::json(data) {
+	// Convert the HTTP request body
+	let data = bytes_to_utf8(&body)?;
+	// Parse the Record ID as a SurrealQL value
+	let rid = match surrealdb::sql::json(&id) {
+		Ok(id) => id,
+		Err(_) => Value::from(id),
+	};
+	// Parse the request body as JSON
+	match surrealdb::sql::value(data) {
 		Ok(data) => {
+			// Specify the request statement
 			let sql = "UPDATE type::thing($table, $id) CONTENT $data";
+			// Specify the request variables
 			let vars = map! {
 				String::from("table") => Value::from(table),
-				String::from("id") => Value::from(id),
+				String::from("id") => rid,
 				String::from("data") => data,
+				=> params.parse()
 			};
+			// Execute the query and return the result
 			match db.execute(sql, &session, Some(vars)).await {
-				Ok(res) => match output.as_ref() {
-					"application/json" => Ok(output::json(&res)),
-					"application/cbor" => Ok(output::cbor(&res)),
-					"application/msgpack" => Ok(output::pack(&res)),
-					_ => Err(warp::reject::not_found()),
+				Ok(res) => match maybe_output.as_deref() {
+					// Simple serialization
+					Some(Accept::ApplicationJson) => Ok(output::json(&output::simplify(res))),
+					Some(Accept::ApplicationCbor) => Ok(output::cbor(&output::simplify(res))),
+					Some(Accept::ApplicationPack) => Ok(output::pack(&output::simplify(res))),
+					// Internal serialization
+					Some(Accept::Surrealdb) => Ok(output::full(&res)),
+					// An incorrect content-type was requested
+					_ => Err(Error::InvalidType),
 				},
-				Err(err) => Err(warp::reject::custom(Error::from(err))),
+				// There was an error when executing the query
+				Err(err) => Err(Error::from(err)),
 			}
 		}
-		Err(_) => Err(warp::reject::custom(Error::Request)),
+		Err(_) => Err(Error::Request),
 	}
 }
 
 async fn modify_one(
-	session: Session,
-	output: String,
-	table: String,
-	id: String,
+	Extension(session): Extension<Session>,
+	maybe_output: Option<TypedHeader<Accept>>,
+	Query(params): Query<Params>,
+	Path((table, id)): Path<(String, String)>,
 	body: Bytes,
-) -> Result<impl warp::Reply, warp::Rejection> {
+) -> Result<impl IntoResponse, impl IntoResponse> {
+	// Get the datastore reference
 	let db = DB.get().unwrap();
-	let data = str::from_utf8(&body).unwrap();
-	match surrealdb::sql::json(data) {
+	// Convert the HTTP request body
+	let data = bytes_to_utf8(&body)?;
+	// Parse the Record ID as a SurrealQL value
+	let rid = match surrealdb::sql::json(&id) {
+		Ok(id) => id,
+		Err(_) => Value::from(id),
+	};
+	// Parse the request body as JSON
+	match surrealdb::sql::value(data) {
 		Ok(data) => {
+			// Specify the request statement
 			let sql = "UPDATE type::thing($table, $id) MERGE $data";
+			// Specify the request variables
 			let vars = map! {
 				String::from("table") => Value::from(table),
-				String::from("id") => Value::from(id),
+				String::from("id") => rid,
 				String::from("data") => data,
+				=> params.parse()
 			};
+			// Execute the query and return the result
 			match db.execute(sql, &session, Some(vars)).await {
-				Ok(res) => match output.as_ref() {
-					"application/json" => Ok(output::json(&res)),
-					"application/cbor" => Ok(output::cbor(&res)),
-					"application/msgpack" => Ok(output::pack(&res)),
-					_ => Err(warp::reject::not_found()),
+				Ok(res) => match maybe_output.as_deref() {
+					// Simple serialization
+					Some(Accept::ApplicationJson) => Ok(output::json(&output::simplify(res))),
+					Some(Accept::ApplicationCbor) => Ok(output::cbor(&output::simplify(res))),
+					Some(Accept::ApplicationPack) => Ok(output::pack(&output::simplify(res))),
+					// Internal serialization
+					Some(Accept::Surrealdb) => Ok(output::full(&res)),
+					// An incorrect content-type was requested
+					_ => Err(Error::InvalidType),
 				},
-				Err(err) => Err(warp::reject::custom(Error::from(err))),
+				// There was an error when executing the query
+				Err(err) => Err(Error::from(err)),
 			}
 		}
-		Err(_) => Err(warp::reject::custom(Error::Request)),
+		Err(_) => Err(Error::Request),
 	}
 }
 
 async fn delete_one(
-	session: Session,
-	output: String,
-	table: String,
-	id: String,
-) -> Result<impl warp::Reply, warp::Rejection> {
+	Extension(session): Extension<Session>,
+	maybe_output: Option<TypedHeader<Accept>>,
+	Path((table, id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, impl IntoResponse> {
+	// Get the datastore reference
 	let db = DB.get().unwrap();
-	let sql = "DELETE type::thing($table, $id)";
+	// Specify the request statement
+	let sql = "DELETE type::thing($table, $id) RETURN BEFORE";
+	// Parse the Record ID as a SurrealQL value
+	let rid = match surrealdb::sql::json(&id) {
+		Ok(id) => id,
+		Err(_) => Value::from(id),
+	};
+	// Specify the request variables
 	let vars = map! {
 		String::from("table") => Value::from(table),
-		String::from("id") => Value::from(id),
+		String::from("id") => rid,
 	};
+	// Execute the query and return the result
 	match db.execute(sql, &session, Some(vars)).await {
-		Ok(res) => match output.as_ref() {
-			"application/json" => Ok(output::json(&res)),
-			"application/cbor" => Ok(output::cbor(&res)),
-			"application/msgpack" => Ok(output::pack(&res)),
-			_ => Err(warp::reject::not_found()),
+		Ok(res) => match maybe_output.as_deref() {
+			// Simple serialization
+			Some(Accept::ApplicationJson) => Ok(output::json(&output::simplify(res))),
+			Some(Accept::ApplicationCbor) => Ok(output::cbor(&output::simplify(res))),
+			Some(Accept::ApplicationPack) => Ok(output::pack(&output::simplify(res))),
+			// Internal serialization
+			Some(Accept::Surrealdb) => Ok(output::full(&res)),
+			// An incorrect content-type was requested
+			_ => Err(Error::InvalidType),
 		},
-		Err(err) => Err(warp::reject::custom(Error::from(err))),
+		// There was an error when executing the query
+		Err(err) => Err(Error::from(err)),
 	}
 }

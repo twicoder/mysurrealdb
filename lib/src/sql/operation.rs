@@ -1,37 +1,38 @@
 use crate::sql::idiom::Idiom;
 use crate::sql::value::Value;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
-pub struct Operation {
-	pub op: Op,
-	pub path: Idiom,
-	pub value: Value,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
-pub enum Op {
-	None,
-	Add,
-	Remove,
-	Replace,
-	Change,
-}
-
-impl Default for Op {
-	fn default() -> Op {
-		Op::Add
-	}
-}
-
-impl From<&Value> for Op {
-	fn from(v: &Value) -> Self {
-		match v.to_strand().as_str() {
-			"add" => Op::Add,
-			"remove" => Op::Remove,
-			"replace" => Op::Replace,
-			"change" => Op::Change,
-			_ => Op::None,
-		}
-	}
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[serde(tag = "op")]
+#[serde(rename_all = "lowercase")]
+#[revisioned(revision = 1)]
+pub enum Operation {
+	Add {
+		path: Idiom,
+		value: Value,
+	},
+	Remove {
+		path: Idiom,
+	},
+	Replace {
+		path: Idiom,
+		value: Value,
+	},
+	Change {
+		path: Idiom,
+		value: Value,
+	},
+	Copy {
+		path: Idiom,
+		from: Idiom,
+	},
+	Move {
+		path: Idiom,
+		from: Idiom,
+	},
+	Test {
+		path: Idiom,
+		value: Value,
+	},
 }

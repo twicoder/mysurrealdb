@@ -1,17 +1,17 @@
 use crate::ctx::Context;
-use crate::dbs::Options;
-use crate::dbs::Transaction;
+use crate::dbs::{Options, Transaction};
 use crate::err::Error;
+use crate::exe::try_join_all_buffered;
 use crate::sql::part::Next;
 use crate::sql::part::Part;
 use crate::sql::value::Value;
 use async_recursion::async_recursion;
-use futures::future::try_join_all;
 
 impl Value {
-	#[cfg_attr(feature = "parallel", async_recursion)]
-	#[cfg_attr(not(feature = "parallel"), async_recursion(?Send))]
-	pub async fn set(
+	/// Asynchronous method for setting a field on a `Value`
+	#[cfg_attr(not(target_arch = "wasm32"), async_recursion)]
+	#[cfg_attr(target_arch = "wasm32", async_recursion(?Send))]
+	pub(crate) async fn set(
 		&mut self,
 		ctx: &Context<'_>,
 		opt: &Options,
@@ -20,19 +20,10 @@ impl Value {
 		val: Value,
 	) -> Result<(), Error> {
 		match path.first() {
-			// Get the current path part
+			// Get the current value at path
 			Some(p) => match self {
-				// Current path part is an object
+				// Current value at path is an object
 				Value::Object(v) => match p {
-					Part::Thing(t) => match v.get_mut(t.to_raw().as_str()) {
-						Some(v) if v.is_some() => v.set(ctx, opt, txn, path.next(), val).await,
-						_ => {
-							let mut obj = Value::base();
-							obj.set(ctx, opt, txn, path.next(), val).await?;
-							v.insert(t.to_raw(), obj);
-							Ok(())
-						}
-					},
 					Part::Graph(g) => match v.get_mut(g.to_raw().as_str()) {
 						Some(v) if v.is_some() => v.set(ctx, opt, txn, path.next(), val).await,
 						_ => {
@@ -42,7 +33,7 @@ impl Value {
 							Ok(())
 						}
 					},
-					Part::Field(f) => match v.get_mut(f.to_raw().as_str()) {
+					Part::Field(f) => match v.get_mut(f.as_str()) {
 						Some(v) if v.is_some() => v.set(ctx, opt, txn, path.next(), val).await,
 						_ => {
 							let mut obj = Value::base();
@@ -51,14 +42,35 @@ impl Value {
 							Ok(())
 						}
 					},
+					Part::Index(i) => match v.get_mut(&i.to_string()) {
+						Some(v) if v.is_some() => v.set(ctx, opt, txn, path.next(), val).await,
+						_ => {
+							let mut obj = Value::base();
+							obj.set(ctx, opt, txn, path.next(), val).await?;
+							v.insert(i.to_string(), obj);
+							Ok(())
+						}
+					},
+					Part::Value(x) => match x.compute(ctx, opt, txn, None).await? {
+						Value::Strand(f) => match v.get_mut(f.as_str()) {
+							Some(v) if v.is_some() => v.set(ctx, opt, txn, path.next(), val).await,
+							_ => {
+								let mut obj = Value::base();
+								obj.set(ctx, opt, txn, path.next(), val).await?;
+								v.insert(f.to_string(), obj);
+								Ok(())
+							}
+						},
+						_ => Ok(()),
+					},
 					_ => Ok(()),
 				},
-				// Current path part is an array
+				// Current value at path is an array
 				Value::Array(v) => match p {
 					Part::All => {
 						let path = path.next();
 						let futs = v.iter_mut().map(|v| v.set(ctx, opt, txn, path, val.clone()));
-						try_join_all(futs).await?;
+						try_join_all_buffered(futs).await?;
 						Ok(())
 					}
 					Part::First => match v.first_mut() {
@@ -73,27 +85,58 @@ impl Value {
 						Some(v) => v.set(ctx, opt, txn, path.next(), val).await,
 						None => Ok(()),
 					},
-					Part::Where(w) => {
-						let path = path.next();
-						for v in v.iter_mut() {
-							if w.compute(ctx, opt, txn, Some(v)).await?.is_truthy() {
-								v.set(ctx, opt, txn, path, val.clone()).await?;
+					Part::Where(w) => match path.next().first() {
+						Some(Part::Index(_)) => {
+							let mut a = Vec::new();
+							let mut p = Vec::new();
+							// Store the elements and positions to update
+							for (i, o) in v.iter_mut().enumerate() {
+								let cur = o.into();
+								if w.compute(ctx, opt, txn, Some(&cur)).await?.is_truthy() {
+									a.push(o.clone());
+									p.push(i);
+								}
 							}
+							// Convert the matched elements array to a value
+							let mut a = Value::from(a);
+							// Set the new value on the matches elements
+							a.set(ctx, opt, txn, path.next(), val.clone()).await?;
+							// Push the new values into the original array
+							for (i, p) in p.into_iter().enumerate() {
+								v[p] = a.pick(&[Part::Index(i.into())]);
+							}
+							Ok(())
 						}
-						Ok(())
-					}
+						_ => {
+							let path = path.next();
+							for v in v.iter_mut() {
+								let cur = v.into();
+								if w.compute(ctx, opt, txn, Some(&cur)).await?.is_truthy() {
+									v.set(ctx, opt, txn, path, val.clone()).await?;
+								}
+							}
+							Ok(())
+						}
+					},
+					Part::Value(x) => match x.compute(ctx, opt, txn, None).await? {
+						Value::Number(i) => match v.get_mut(i.to_usize()) {
+							Some(v) => v.set(ctx, opt, txn, path.next(), val).await,
+							None => Ok(()),
+						},
+						_ => Ok(()),
+					},
 					_ => {
 						let futs = v.iter_mut().map(|v| v.set(ctx, opt, txn, path, val.clone()));
-						try_join_all(futs).await?;
+						try_join_all_buffered(futs).await?;
 						Ok(())
 					}
 				},
-				// Current path part is empty
+				// Current value at path is empty
 				Value::Null => {
 					*self = Value::base();
 					self.set(ctx, opt, txn, path, val).await
 				}
-				// Current path part is empty
+				// Current value at path is empty
 				Value::None => {
 					*self = Value::base();
 					self.set(ctx, opt, txn, path, val).await
@@ -254,6 +297,26 @@ mod tests {
 		let idi = Idiom::parse("test.something[WHERE age > 35]");
 		let mut val = Value::parse("{ test: { something: [{ age: 34 }, { age: 36 }] } }");
 		let res = Value::parse("{ test: { something: [{ age: 34 }, 21] } }");
+		val.set(&ctx, &opt, &txn, &idi, Value::from(21)).await.unwrap();
+		assert_eq!(res, val);
+	}
+
+	#[tokio::test]
+	async fn set_array_where_fields_array_index() {
+		let (ctx, opt, txn) = mock().await;
+		let idi = Idiom::parse("test.something[WHERE age > 30][0]");
+		let mut val = Value::parse("{ test: { something: [{ age: 34 }, { age: 36 }] } }");
+		let res = Value::parse("{ test: { something: [21, { age: 36 }] } }");
+		val.set(&ctx, &opt, &txn, &idi, Value::from(21)).await.unwrap();
+		assert_eq!(res, val);
+	}
+
+	#[tokio::test]
+	async fn set_array_where_fields_array_index_field() {
+		let (ctx, opt, txn) = mock().await;
+		let idi = Idiom::parse("test.something[WHERE age > 30][0].age");
+		let mut val = Value::parse("{ test: { something: [{ age: 34 }, { age: 36 }] } }");
+		let res = Value::parse("{ test: { something: [{ age: 21 }, { age: 36 }] } }");
 		val.set(&ctx, &opt, &txn, &idi, Value::from(21)).await.unwrap();
 		assert_eq!(res, val);
 	}

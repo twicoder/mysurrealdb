@@ -1,41 +1,89 @@
+use crate::dbs::DB;
 use crate::err::Error;
-use crate::net::head;
+use crate::net::input::bytes_to_utf8;
+use crate::net::output;
+use axum::extract::DefaultBodyLimit;
+use axum::response::IntoResponse;
+use axum::routing::options;
+use axum::Extension;
+use axum::Router;
+use axum::TypedHeader;
 use bytes::Bytes;
-use std::str;
+use http_body::Body as HttpBody;
+use serde::Serialize;
+use surrealdb::dbs::Session;
 use surrealdb::sql::Value;
-use warp::http::Response;
-use warp::Filter;
+use tower_http::limit::RequestBodyLimitLayer;
 
-const MAX: u64 = 1024; // 1 KiB
+use super::headers::Accept;
 
-pub fn config() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-	// Set base path
-	let base = warp::path("signin").and(warp::path::end());
-	// Set opts method
-	let opts = base.and(warp::options()).map(warp::reply);
-	// Set post method
-	let post = base
-		.and(warp::post())
-		.and(warp::body::content_length_limit(MAX))
-		.and(warp::body::bytes())
-		.and_then(handler);
-	// Specify route
-	opts.or(post).with(head::cors())
+const MAX: usize = 1024; // 1 KiB
+
+#[derive(Serialize)]
+struct Success {
+	code: u16,
+	details: String,
+	token: Option<String>,
 }
 
-async fn handler(body: Bytes) -> Result<impl warp::Reply, warp::Rejection> {
+impl Success {
+	fn new(token: Option<String>) -> Success {
+		Success {
+			token,
+			code: 200,
+			details: String::from("Authentication succeeded"),
+		}
+	}
+}
+
+pub(super) fn router<S, B>() -> Router<S, B>
+where
+	B: HttpBody + Send + 'static,
+	B::Data: Send,
+	B::Error: std::error::Error + Send + Sync + 'static,
+	S: Clone + Send + Sync + 'static,
+{
+	Router::new()
+		.route("/signin", options(|| async {}).post(handler))
+		.route_layer(DefaultBodyLimit::disable())
+		.layer(RequestBodyLimitLayer::new(MAX))
+}
+
+async fn handler(
+	Extension(mut session): Extension<Session>,
+	maybe_output: Option<TypedHeader<Accept>>,
+	body: Bytes,
+) -> Result<impl IntoResponse, impl IntoResponse> {
+	// Get a database reference
+	let kvs = DB.get().unwrap();
 	// Convert the HTTP body into text
-	let data = str::from_utf8(&body).unwrap();
+	let data = bytes_to_utf8(&body)?;
 	// Parse the provided data as JSON
 	match surrealdb::sql::json(data) {
 		// The provided value was an object
-		Ok(Value::Object(vars)) => match crate::iam::signin::signin(vars).await {
-			// Authentication was successful
-			Ok(v) => Ok(Response::builder().body(v)),
-			// There was an error with authentication
-			Err(e) => Err(warp::reject::custom(e)),
-		},
+		Ok(Value::Object(vars)) => {
+			match surrealdb::iam::signin::signin(kvs, &mut session, vars).await.map_err(Error::from)
+			{
+				// Authentication was successful
+				Ok(v) => match maybe_output.as_deref() {
+					// Simple serialization
+					Some(Accept::ApplicationJson) => Ok(output::json(&Success::new(v))),
+					Some(Accept::ApplicationCbor) => Ok(output::cbor(&Success::new(v))),
+					Some(Accept::ApplicationPack) => Ok(output::pack(&Success::new(v))),
+					// Internal serialization
+					Some(Accept::Surrealdb) => Ok(output::full(&Success::new(v))),
+					// Text serialization
+					Some(Accept::TextPlain) => Ok(output::text(v.unwrap_or_default())),
+					// Return nothing
+					None => Ok(output::none()),
+					// An incorrect content-type was requested
+					_ => Err(Error::InvalidType),
+				},
+				// There was an error with authentication
+				Err(err) => Err(err),
+			}
+		}
 		// The provided value was not an object
-		_ => Err(warp::reject::custom(Error::Request)),
+		_ => Err(Error::Request),
 	}
 }

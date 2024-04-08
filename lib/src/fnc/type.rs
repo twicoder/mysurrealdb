@@ -1,120 +1,229 @@
 use crate::ctx::Context;
+use crate::dbs::{Options, Transaction};
+use crate::doc::CursorDoc;
 use crate::err::Error;
-use crate::sql::geometry::Geometry;
-use crate::sql::number::Number;
+use crate::sql::parser::idiom;
 use crate::sql::table::Table;
 use crate::sql::thing::Thing;
 use crate::sql::value::Value;
 
-pub fn bool(_: &Context, mut args: Vec<Value>) -> Result<Value, Error> {
-	match args.remove(0).is_truthy() {
-		true => Ok(Value::True),
-		false => Ok(Value::False),
-	}
+pub fn bool((val,): (Value,)) -> Result<Value, Error> {
+	val.convert_to_bool().map(Value::from)
 }
 
-pub fn datetime(_: &Context, mut args: Vec<Value>) -> Result<Value, Error> {
-	let val = args.remove(0);
-	match val {
-		Value::Datetime(_) => Ok(val),
-		_ => Ok(Value::Datetime(val.as_datetime())),
-	}
+pub fn datetime((val,): (Value,)) -> Result<Value, Error> {
+	val.convert_to_datetime().map(Value::from)
 }
 
-pub fn decimal(_: &Context, mut args: Vec<Value>) -> Result<Value, Error> {
-	let val = args.remove(0);
-	match val {
-		Value::Number(Number::Decimal(_)) => Ok(val),
-		_ => Ok(Value::Number(Number::Decimal(val.as_decimal()))),
-	}
+pub fn decimal((val,): (Value,)) -> Result<Value, Error> {
+	val.convert_to_decimal().map(Value::from)
 }
 
-pub fn duration(_: &Context, mut args: Vec<Value>) -> Result<Value, Error> {
-	let val = args.remove(0);
-	match val {
-		Value::Duration(_) => Ok(val),
-		_ => Ok(Value::Duration(val.as_duration())),
-	}
+pub fn duration((val,): (Value,)) -> Result<Value, Error> {
+	val.convert_to_duration().map(Value::from)
 }
 
-pub fn float(_: &Context, mut args: Vec<Value>) -> Result<Value, Error> {
-	let val = args.remove(0);
-	match val {
-		Value::Number(Number::Float(_)) => Ok(val),
-		_ => Ok(Value::Number(Number::Float(val.as_float()))),
-	}
-}
-
-pub fn int(_: &Context, mut args: Vec<Value>) -> Result<Value, Error> {
-	let val = args.remove(0);
-	match val {
-		Value::Number(Number::Int(_)) => Ok(val),
-		_ => Ok(Value::Number(Number::Int(val.as_int()))),
-	}
-}
-
-pub fn number(_: &Context, mut args: Vec<Value>) -> Result<Value, Error> {
-	let val = args.remove(0);
-	match val {
-		Value::Number(_) => Ok(val),
-		_ => Ok(Value::Number(val.as_number())),
-	}
-}
-
-pub fn point(_: &Context, mut args: Vec<Value>) -> Result<Value, Error> {
-	match args.len() {
-		2 => {
-			let x = args.remove(0);
-			let y = args.remove(0);
-			Ok((x.as_float(), y.as_float()).into())
+pub async fn field(
+	(ctx, opt, txn, doc): (
+		&Context<'_>,
+		Option<&Options>,
+		Option<&Transaction>,
+		Option<&CursorDoc<'_>>,
+	),
+	(val,): (String,),
+) -> Result<Value, Error> {
+	match (opt, txn) {
+		(Some(opt), Some(txn)) => {
+			// Parse the string as an Idiom
+			let idi = idiom(&val)?;
+			// Return the Idiom or fetch the field
+			match opt.projections {
+				true => Ok(idi.compute(ctx, opt, txn, doc).await?),
+				false => Ok(idi.into()),
+			}
 		}
-		1 => match args.remove(0) {
-			Value::Array(v) if v.len() == 2 => Ok(v.as_point().into()),
-			Value::Geometry(Geometry::Point(v)) => Ok(v.into()),
-			_ => Ok(Value::None),
-		},
-		_ => unreachable!(),
-	}
-}
-
-pub fn regex(_: &Context, mut args: Vec<Value>) -> Result<Value, Error> {
-	match args.remove(0) {
-		Value::Strand(v) => Ok(Value::Regex(v.as_str().into())),
 		_ => Ok(Value::None),
 	}
 }
 
-pub fn string(_: &Context, mut args: Vec<Value>) -> Result<Value, Error> {
-	let val = args.remove(0);
-	match val {
-		Value::Strand(_) => Ok(val),
-		_ => Ok(Value::Strand(val.as_strand())),
+pub async fn fields(
+	(ctx, opt, txn, doc): (
+		&Context<'_>,
+		Option<&Options>,
+		Option<&Transaction>,
+		Option<&CursorDoc<'_>>,
+	),
+	(val,): (Vec<String>,),
+) -> Result<Value, Error> {
+	match (opt, txn) {
+		(Some(opt), Some(txn)) => {
+			let mut args: Vec<Value> = Vec::with_capacity(val.len());
+			for v in val {
+				// Parse the string as an Idiom
+				let idi = idiom(&v)?;
+				// Return the Idiom or fetch the field
+				match opt.projections {
+					true => args.push(idi.compute(ctx, opt, txn, doc).await?),
+					false => args.push(idi.into()),
+				}
+			}
+			Ok(args.into())
+		}
+		_ => Ok(Value::None),
 	}
 }
 
-pub fn table(_: &Context, mut args: Vec<Value>) -> Result<Value, Error> {
-	Ok(Value::Table(Table(args.remove(0).as_string())))
+pub fn float((val,): (Value,)) -> Result<Value, Error> {
+	val.convert_to_float().map(Value::from)
 }
 
-pub fn thing(_: &Context, mut args: Vec<Value>) -> Result<Value, Error> {
-	match args.len() {
-		2 => {
-			let tb = args.remove(0);
-			match args.remove(0) {
-				Value::Thing(id) => Ok(Value::Thing(Thing {
-					tb: tb.as_string(),
-					id: id.id,
-				})),
-				id => Ok(Value::Thing(Thing {
-					tb: tb.as_string(),
-					id: id.as_string().into(),
-				})),
-			}
+pub fn int((val,): (Value,)) -> Result<Value, Error> {
+	val.convert_to_int().map(Value::from)
+}
+
+pub fn number((val,): (Value,)) -> Result<Value, Error> {
+	val.convert_to_number().map(Value::from)
+}
+
+pub fn point((val,): (Value,)) -> Result<Value, Error> {
+	val.convert_to_point().map(Value::from)
+}
+
+pub fn string((val,): (Value,)) -> Result<Value, Error> {
+	val.convert_to_strand().map(Value::from)
+}
+
+pub fn table((val,): (Value,)) -> Result<Value, Error> {
+	Ok(Value::Table(Table(match val {
+		Value::Thing(t) => t.tb,
+		v => v.as_string(),
+	})))
+}
+
+pub fn thing((arg1, arg2): (Value, Option<Value>)) -> Result<Value, Error> {
+	Ok(if let Some(arg2) = arg2 {
+		Value::Thing(Thing {
+			tb: arg1.as_string(),
+			id: match arg2 {
+				Value::Thing(v) => v.id,
+				Value::Array(v) => v.into(),
+				Value::Object(v) => v.into(),
+				Value::Number(v) => v.into(),
+				v => v.as_string().into(),
+			},
+		})
+	} else {
+		match arg1 {
+			Value::Thing(v) => v.into(),
+			_ => Value::None,
 		}
-		1 => match args.remove(0) {
-			Value::Thing(v) => Ok(v.into()),
-			_ => Ok(Value::None),
-		},
-		_ => unreachable!(),
+	})
+}
+
+pub mod is {
+	use crate::err::Error;
+	use crate::sql::value::Value;
+	use crate::sql::Geometry;
+
+	pub fn array((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(arg.is_array().into())
+	}
+
+	pub fn bool((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(arg.is_bool().into())
+	}
+
+	pub fn bytes((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(arg.is_bytes().into())
+	}
+
+	pub fn collection((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(matches!(arg, Value::Geometry(Geometry::Collection(_))).into())
+	}
+
+	pub fn datetime((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(arg.is_datetime().into())
+	}
+
+	pub fn decimal((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(arg.is_decimal().into())
+	}
+
+	pub fn duration((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(arg.is_duration().into())
+	}
+
+	pub fn float((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(arg.is_float().into())
+	}
+
+	pub fn geometry((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(arg.is_geometry().into())
+	}
+
+	pub fn int((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(arg.is_int().into())
+	}
+
+	pub fn line((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(matches!(arg, Value::Geometry(Geometry::Line(_))).into())
+	}
+
+	pub fn null((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(arg.is_null().into())
+	}
+
+	pub fn multiline((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(matches!(arg, Value::Geometry(Geometry::MultiLine(_))).into())
+	}
+
+	pub fn multipoint((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(matches!(arg, Value::Geometry(Geometry::MultiPoint(_))).into())
+	}
+
+	pub fn multipolygon((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(matches!(arg, Value::Geometry(Geometry::MultiPolygon(_))).into())
+	}
+
+	pub fn number((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(arg.is_number().into())
+	}
+
+	pub fn object((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(arg.is_object().into())
+	}
+
+	pub fn point((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(matches!(arg, Value::Geometry(Geometry::Point(_))).into())
+	}
+
+	pub fn polygon((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(matches!(arg, Value::Geometry(Geometry::Polygon(_))).into())
+	}
+
+	pub fn record((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(arg.is_record().into())
+	}
+
+	pub fn string((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(arg.is_strand().into())
+	}
+
+	pub fn uuid((arg,): (Value,)) -> Result<Value, Error> {
+		Ok(arg.is_uuid().into())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use crate::sql::value::Value;
+
+	#[test]
+	fn is_array() {
+		let value = super::is::array((vec!["hello", "world"].into(),)).unwrap();
+		assert_eq!(value, Value::Bool(true));
+
+		let value = super::is::array(("test".into(),)).unwrap();
+		assert_eq!(value, Value::Bool(false));
 	}
 }

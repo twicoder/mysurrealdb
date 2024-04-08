@@ -1,17 +1,28 @@
+use axum::response::{IntoResponse, Response};
 use http::header::{HeaderValue, CONTENT_TYPE};
 use http::StatusCode;
 use serde::Serialize;
+use serde_json::Value as Json;
+use surrealdb::sql;
+
+use super::headers::Accept;
 
 pub enum Output {
 	None,
 	Fail,
+	Text(String),
 	Json(Vec<u8>), // JSON
 	Cbor(Vec<u8>), // CBOR
 	Pack(Vec<u8>), // MessagePack
+	Full(Vec<u8>), // Full type serialization
 }
 
 pub fn none() -> Output {
 	Output::None
+}
+
+pub fn text(val: String) -> Output {
+	Output::Text(val)
 }
 
 pub fn json<T>(val: &T) -> Output
@@ -44,26 +55,38 @@ where
 	}
 }
 
-impl warp::Reply for Output {
-	fn into_response(self) -> warp::reply::Response {
+pub fn full<T>(val: &T) -> Output
+where
+	T: Serialize,
+{
+	match surrealdb::sql::serde::serialize(val) {
+		Ok(v) => Output::Full(v),
+		Err(_) => Output::Fail,
+	}
+}
+
+/// Convert and simplify the value into JSON
+pub fn simplify<T: Serialize>(v: T) -> Json {
+	sql::to_value(v).unwrap().into()
+}
+
+impl IntoResponse for Output {
+	fn into_response(self) -> Response {
 		match self {
+			Output::Text(v) => {
+				([(CONTENT_TYPE, HeaderValue::from(Accept::TextPlain))], v).into_response()
+			}
 			Output::Json(v) => {
-				let mut res = warp::reply::Response::new(v.into());
-				let con = HeaderValue::from_static("application/json");
-				res.headers_mut().insert(CONTENT_TYPE, con);
-				res
+				([(CONTENT_TYPE, HeaderValue::from(Accept::ApplicationJson))], v).into_response()
 			}
 			Output::Cbor(v) => {
-				let mut res = warp::reply::Response::new(v.into());
-				let con = HeaderValue::from_static("application/cbor");
-				res.headers_mut().insert(CONTENT_TYPE, con);
-				res
+				([(CONTENT_TYPE, HeaderValue::from(Accept::ApplicationCbor))], v).into_response()
 			}
 			Output::Pack(v) => {
-				let mut res = warp::reply::Response::new(v.into());
-				let con = HeaderValue::from_static("application/msgpack");
-				res.headers_mut().insert(CONTENT_TYPE, con);
-				res
+				([(CONTENT_TYPE, HeaderValue::from(Accept::ApplicationPack))], v).into_response()
+			}
+			Output::Full(v) => {
+				([(CONTENT_TYPE, HeaderValue::from(Accept::Surrealdb))], v).into_response()
 			}
 			Output::None => StatusCode::OK.into_response(),
 			Output::Fail => StatusCode::INTERNAL_SERVER_ERROR.into_response(),

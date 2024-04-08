@@ -1,13 +1,13 @@
 use crate::ctx::Context;
-use crate::dbs::Options;
-use crate::dbs::Transaction;
+use crate::dbs::{Options, Transaction};
 use crate::err::Error;
 use crate::sql::number::Number;
 use crate::sql::part::Part;
 use crate::sql::value::Value;
 
 impl Value {
-	pub async fn increment(
+	/// Asynchronous method for incrementing a field in a `Value`
+	pub(crate) async fn increment(
 		&mut self,
 		ctx: &Context<'_>,
 		opt: &Options,
@@ -15,7 +15,7 @@ impl Value {
 		path: &[Part],
 		val: Value,
 	) -> Result<(), Error> {
-		match self.get(ctx, opt, txn, path).await? {
+		match self.get(ctx, opt, txn, None, path).await? {
 			Value::Number(v) => match val {
 				Value::Number(x) => self.set(ctx, opt, txn, path, Value::from(v + x)).await,
 				_ => Ok(()),
@@ -45,7 +45,7 @@ mod tests {
 	use crate::sql::test::Parse;
 
 	#[tokio::test]
-	async fn inc_none() {
+	async fn increment_none() {
 		let (ctx, opt, txn) = mock().await;
 		let idi = Idiom::parse("other");
 		let mut val = Value::parse("{ test: 100 }");
@@ -55,7 +55,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn inc_number() {
+	async fn increment_number() {
 		let (ctx, opt, txn) = mock().await;
 		let idi = Idiom::parse("test");
 		let mut val = Value::parse("{ test: 100 }");
@@ -65,7 +65,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn inc_array_number() {
+	async fn increment_array_number() {
 		let (ctx, opt, txn) = mock().await;
 		let idi = Idiom::parse("test[1]");
 		let mut val = Value::parse("{ test: [100, 200, 300] }");
@@ -75,21 +75,21 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn inc_array_value() {
+	async fn increment_array_value() {
 		let (ctx, opt, txn) = mock().await;
 		let idi = Idiom::parse("test");
 		let mut val = Value::parse("{ test: [100, 200, 300] }");
-		let res = Value::parse("{ test: [100, 200, 300] }");
+		let res = Value::parse("{ test: [100, 200, 300, 200] }");
 		val.increment(&ctx, &opt, &txn, &idi, Value::from(200)).await.unwrap();
 		assert_eq!(res, val);
 	}
 
 	#[tokio::test]
-	async fn inc_array_array() {
+	async fn increment_array_array() {
 		let (ctx, opt, txn) = mock().await;
 		let idi = Idiom::parse("test");
 		let mut val = Value::parse("{ test: [100, 200, 300] }");
-		let res = Value::parse("{ test: [100, 200, 300, 400, 500] }");
+		let res = Value::parse("{ test: [100, 200, 300, 100, 300, 400, 500] }");
 		val.increment(&ctx, &opt, &txn, &idi, Value::parse("[100, 300, 400, 500]")).await.unwrap();
 		assert_eq!(res, val);
 	}

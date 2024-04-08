@@ -1,16 +1,24 @@
 use crate::sql::common::commas;
 use crate::sql::error::IResult;
 use crate::sql::escape::escape_ident;
+use crate::sql::fmt::Fmt;
 use crate::sql::id::Id;
 use crate::sql::ident::{ident_raw, Ident};
+use crate::sql::strand::no_nul_bytes;
 use crate::sql::thing::Thing;
 use nom::multi::separated_list1;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::fmt::{self, Display, Formatter};
 use std::ops::Deref;
 use std::str;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
+use super::error::expected;
+
+pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Table";
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub struct Tables(pub Vec<Table>);
 
 impl From<Table> for Tables {
@@ -26,9 +34,9 @@ impl Deref for Tables {
 	}
 }
 
-impl fmt::Display for Tables {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "{}", self.0.iter().map(|ref v| format!("{}", v)).collect::<Vec<_>>().join(", "))
+impl Display for Tables {
+	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+		Display::fmt(&Fmt::comma_separated(&self.0), f)
 	}
 }
 
@@ -37,24 +45,26 @@ pub fn tables(i: &str) -> IResult<&str, Tables> {
 	Ok((i, Tables(v)))
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
-pub struct Table(pub String);
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[serde(rename = "$surrealdb::private::sql::Table")]
+#[revisioned(revision = 1)]
+pub struct Table(#[serde(with = "no_nul_bytes")] pub String);
 
 impl From<String> for Table {
 	fn from(v: String) -> Self {
-		Table(v)
+		Self(v)
 	}
 }
 
 impl From<&str> for Table {
 	fn from(v: &str) -> Self {
-		Table(String::from(v))
+		Self::from(String::from(v))
 	}
 }
 
 impl From<Ident> for Table {
 	fn from(v: Ident) -> Self {
-		Table(v.0)
+		Self(v.0)
 	}
 }
 
@@ -74,14 +84,14 @@ impl Table {
 	}
 }
 
-impl fmt::Display for Table {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "{}", escape_ident(&self.0))
+impl Display for Table {
+	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+		Display::fmt(&escape_ident(&self.0), f)
 	}
 }
 
 pub fn table(i: &str) -> IResult<&str, Table> {
-	let (i, v) = ident_raw(i)?;
+	let (i, v) = expected("a table name", ident_raw)(i)?;
 	Ok((i, Table(v)))
 }
 
@@ -94,7 +104,6 @@ mod tests {
 	fn table_normal() {
 		let sql = "test";
 		let res = table(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("test", format!("{}", out));
 		assert_eq!(out, Table(String::from("test")));
@@ -104,7 +113,6 @@ mod tests {
 	fn table_quoted_backtick() {
 		let sql = "`test`";
 		let res = table(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("test", format!("{}", out));
 		assert_eq!(out, Table(String::from("test")));
@@ -114,7 +122,6 @@ mod tests {
 	fn table_quoted_brackets() {
 		let sql = "⟨test⟩";
 		let res = table(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("test", format!("{}", out));
 		assert_eq!(out, Table(String::from("test")));

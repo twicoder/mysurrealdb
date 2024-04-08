@@ -1,37 +1,66 @@
 use crate::sql::common::is_hex;
 use crate::sql::error::IResult;
-use crate::sql::serde::is_internal_serialization;
+use crate::sql::escape::quote_str;
+use crate::sql::strand::Strand;
 use nom::branch::alt;
 use nom::bytes::complete::take_while_m_n;
 use nom::character::complete::char;
 use nom::combinator::recognize;
 use nom::sequence::delimited;
 use nom::sequence::tuple;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::fmt::{self, Display, Formatter};
 use std::ops::Deref;
 use std::str;
+use std::str::FromStr;
 
-const SINGLE: char = '\'';
-const DOUBLE: char = '"';
+pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Uuid";
 
-#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[serde(rename = "$surrealdb::private::sql::Uuid")]
+#[revisioned(revision = 1)]
 pub struct Uuid(pub uuid::Uuid);
 
-impl From<&str> for Uuid {
-	fn from(s: &str) -> Self {
-		match uuid::Uuid::try_parse(s) {
-			Ok(v) => Uuid(v),
-			_ => Uuid::default(),
-		}
+impl From<uuid::Uuid> for Uuid {
+	fn from(v: uuid::Uuid) -> Self {
+		Uuid(v)
 	}
 }
 
-impl From<String> for Uuid {
-	fn from(s: String) -> Self {
-		match uuid::Uuid::try_parse(&s) {
-			Ok(v) => Uuid(v),
-			_ => Uuid::default(),
+impl From<Uuid> for uuid::Uuid {
+	fn from(s: Uuid) -> Self {
+		s.0
+	}
+}
+
+impl FromStr for Uuid {
+	type Err = ();
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		Self::try_from(s)
+	}
+}
+
+impl TryFrom<String> for Uuid {
+	type Error = ();
+	fn try_from(v: String) -> Result<Self, Self::Error> {
+		Self::try_from(v.as_str())
+	}
+}
+
+impl TryFrom<Strand> for Uuid {
+	type Error = ();
+	fn try_from(v: Strand) -> Result<Self, Self::Error> {
+		Self::try_from(v.as_str())
+	}
+}
+
+impl TryFrom<&str> for Uuid {
+	type Error = ();
+	fn try_from(v: &str) -> Result<Self, Self::Error> {
+		match uuid::Uuid::try_parse(v) {
+			Ok(v) => Ok(Self(v)),
+			Err(_) => Err(()),
 		}
 	}
 }
@@ -44,38 +73,48 @@ impl Deref for Uuid {
 }
 
 impl Uuid {
+	/// Generate a new V4 UUID
 	pub fn new() -> Self {
-		Uuid(uuid::Uuid::new_v4())
+		#[cfg(uuid_unstable)]
+		{
+			Self(uuid::Uuid::now_v7())
+		}
+		#[cfg(not(uuid_unstable))]
+		{
+			Self(uuid::Uuid::new_v4())
+		}
 	}
+	/// Generate a new V4 UUID
+	pub fn new_v4() -> Self {
+		Self(uuid::Uuid::new_v4())
+	}
+	/// Generate a new V7 UUID
+	#[cfg(uuid_unstable)]
+	pub fn new_v7() -> Self {
+		Self(uuid::Uuid::now_v7())
+	}
+	/// Convert the Uuid to a raw String
 	pub fn to_raw(&self) -> String {
 		self.0.to_string()
 	}
 }
 
-impl fmt::Display for Uuid {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "\"{}\"", self.0)
-	}
-}
-
-impl Serialize for Uuid {
-	fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-	where
-		S: serde::Serializer,
-	{
-		if is_internal_serialization() {
-			serializer.serialize_newtype_struct("Uuid", &self.0)
-		} else {
-			serializer.serialize_some(&self.0)
-		}
+impl Display for Uuid {
+	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+		Display::fmt(&quote_str(&self.0.to_string()), f)
 	}
 }
 
 pub fn uuid(i: &str) -> IResult<&str, Uuid> {
-	alt((
-		delimited(char(DOUBLE), uuid_raw, char(DOUBLE)),
-		delimited(char(SINGLE), uuid_raw, char(SINGLE)),
-	))(i)
+	alt((uuid_single, uuid_double))(i)
+}
+
+fn uuid_single(i: &str) -> IResult<&str, Uuid> {
+	delimited(char('\''), uuid_raw, char('\''))(i)
+}
+
+fn uuid_double(i: &str) -> IResult<&str, Uuid> {
+	delimited(char('\"'), uuid_raw, char('\"'))(i)
 }
 
 fn uuid_raw(i: &str) -> IResult<&str, Uuid> {
@@ -84,14 +123,23 @@ fn uuid_raw(i: &str) -> IResult<&str, Uuid> {
 		char('-'),
 		take_while_m_n(4, 4, is_hex),
 		char('-'),
-		alt((char('1'), char('2'), char('3'), char('4'))),
+		alt((
+			char('1'),
+			char('2'),
+			char('3'),
+			char('4'),
+			char('5'),
+			char('6'),
+			char('7'),
+			char('8'),
+		)),
 		take_while_m_n(3, 3, is_hex),
 		char('-'),
 		take_while_m_n(4, 4, is_hex),
 		char('-'),
 		take_while_m_n(12, 12, is_hex),
 	)))(i)?;
-	Ok((i, Uuid::from(v)))
+	Ok((i, Uuid::try_from(v).unwrap()))
 }
 
 #[cfg(test)]
@@ -105,8 +153,8 @@ mod tests {
 		let res = uuid_raw(sql);
 		assert!(res.is_ok());
 		let out = res.unwrap().1;
-		assert_eq!("\"e72bee20-f49b-11ec-b939-0242ac120002\"", format!("{}", out));
-		assert_eq!(out, Uuid::from("e72bee20-f49b-11ec-b939-0242ac120002"));
+		assert_eq!("'e72bee20-f49b-11ec-b939-0242ac120002'", format!("{}", out));
+		assert_eq!(out, Uuid::try_from("e72bee20-f49b-11ec-b939-0242ac120002").unwrap());
 	}
 
 	#[test]
@@ -115,7 +163,7 @@ mod tests {
 		let res = uuid_raw(sql);
 		assert!(res.is_ok());
 		let out = res.unwrap().1;
-		assert_eq!("\"b19bc00b-aa98-486c-ae37-c8e1c54295b1\"", format!("{}", out));
-		assert_eq!(out, Uuid::from("b19bc00b-aa98-486c-ae37-c8e1c54295b1"));
+		assert_eq!("'b19bc00b-aa98-486c-ae37-c8e1c54295b1'", format!("{}", out));
+		assert_eq!(out, Uuid::try_from("b19bc00b-aa98-486c-ae37-c8e1c54295b1").unwrap());
 	}
 }

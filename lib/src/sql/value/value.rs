@@ -1,60 +1,73 @@
 #![allow(clippy::derive_ord_xor_partial_ord)]
 
 use crate::ctx::Context;
-use crate::dbs::Options;
-use crate::dbs::Response;
-use crate::dbs::Transaction;
+use crate::dbs::{Options, Transaction};
+use crate::doc::CursorDoc;
 use crate::err::Error;
+use crate::fnc::util::string::fuzzy::Fuzzy;
+use crate::sql::array::Uniq;
 use crate::sql::array::{array, Array};
+use crate::sql::block::{block, Block};
+use crate::sql::builtin::builtin_name;
+use crate::sql::bytes::Bytes;
+use crate::sql::cast::{cast, Cast};
+use crate::sql::comment::mightbespace;
 use crate::sql::common::commas;
+use crate::sql::constant::Constant;
 use crate::sql::datetime::{datetime, Datetime};
 use crate::sql::duration::{duration, Duration};
 use crate::sql::edges::{edges, Edges};
+use crate::sql::ending::keyword;
 use crate::sql::error::IResult;
-use crate::sql::expression::{expression, Expression};
-use crate::sql::function::{function, Function};
+use crate::sql::expression::{unary, Expression};
+use crate::sql::fmt::{Fmt, Pretty};
+use crate::sql::function::{builtin_function, defined_function, Function};
+use crate::sql::future::{future, Future};
 use crate::sql::geometry::{geometry, Geometry};
-use crate::sql::id::Id;
-use crate::sql::idiom::{idiom, Idiom};
+use crate::sql::id::{Gen, Id};
+use crate::sql::idiom::{self, reparse_idiom_start, Idiom};
 use crate::sql::kind::Kind;
+use crate::sql::mock::{mock, Mock};
 use crate::sql::model::{model, Model};
 use crate::sql::number::{number, Number};
-use crate::sql::object::{object, Object};
+use crate::sql::object::{key, object, Object};
 use crate::sql::operation::Operation;
 use crate::sql::param::{param, Param};
 use crate::sql::part::Part;
+use crate::sql::range::{range, Range};
 use crate::sql::regex::{regex, Regex};
-use crate::sql::serde::is_internal_serialization;
 use crate::sql::strand::{strand, Strand};
 use crate::sql::subquery::{subquery, Subquery};
 use crate::sql::table::{table, Table};
 use crate::sql::thing::{thing, Thing};
 use crate::sql::uuid::{uuid as unique, Uuid};
+use crate::sql::{builtin, operator, Query};
 use async_recursion::async_recursion;
-use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use derive::Store;
-use fuzzy_matcher::skim::SkimMatcherV2;
-use fuzzy_matcher::FuzzyMatcher;
 use geo::Point;
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
-use nom::combinator::map;
+use nom::character::complete::char;
+use nom::combinator::{self, cut, into, opt};
+use nom::multi::separated_list0;
 use nom::multi::separated_list1;
-use once_cell::sync::Lazy;
+use nom::sequence::terminated;
+use revision::revisioned;
+use rust_decimal::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as Json;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::fmt;
-use std::iter::FromIterator;
-use std::ops;
+use std::fmt::{self, Display, Formatter, Write};
 use std::ops::Deref;
 use std::str::FromStr;
 
-static MATCHER: Lazy<SkimMatcherV2> = Lazy::new(|| SkimMatcherV2::default().ignore_case());
+pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Value";
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub struct Values(pub Vec<Value>);
 
 impl Deref for Values {
@@ -72,9 +85,9 @@ impl IntoIterator for Values {
 	}
 }
 
-impl fmt::Display for Values {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "{}", self.0.iter().map(|ref v| format!("{}", v)).collect::<Vec<_>>().join(", "))
+impl Display for Values {
+	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+		Display::fmt(&Fmt::comma_separated(&self.0), f)
 	}
 }
 
@@ -93,13 +106,21 @@ pub fn whats(i: &str) -> IResult<&str, Values> {
 	Ok((i, Values(v)))
 }
 
-#[derive(Clone, Debug, PartialEq, PartialOrd, Deserialize, Store)]
+#[derive(Clone, Debug, Default, PartialEq, PartialOrd, Serialize, Deserialize, Store, Hash)]
+#[serde(rename = "$surrealdb::private::sql::Value")]
+#[revisioned(revision = 1)]
 pub enum Value {
+	// These value types are simple values which
+	// can be used in query responses sent to
+	// the client. They typically do not need to
+	// be computed, unless an un-computed value
+	// is present inside an Array or Object type.
+	// These types can also be used within indexes
+	// and sort according to their order below.
+	#[default]
 	None,
-	Void,
 	Null,
-	False,
-	True,
+	Bool(bool),
 	Number(Number),
 	Strand(Strand),
 	Duration(Duration),
@@ -108,17 +129,33 @@ pub enum Value {
 	Array(Array),
 	Object(Object),
 	Geometry(Geometry),
-	// ---
+	Bytes(Bytes),
+	Thing(Thing),
+	// These Value types are un-computed values
+	// and are not used in query responses sent
+	// to the client. These types need to be
+	// computed, in order to convert them into
+	// one of the simple types listed above.
+	// These types are first computed into a
+	// simple type before being used in indexes.
 	Param(Param),
 	Idiom(Idiom),
 	Table(Table),
-	Thing(Thing),
-	Model(Model),
+	Mock(Mock),
 	Regex(Regex),
+	Cast(Box<Cast>),
+	Block(Box<Block>),
+	Range(Box<Range>),
 	Edges(Box<Edges>),
+	Future(Box<Future>),
+	Constant(Constant),
+	// Closure(Box<Closure>),
 	Function(Box<Function>),
 	Subquery(Box<Subquery>),
 	Expression(Box<Expression>),
+	Query(Query),
+	MlModel(Box<Model>),
+	// Add new variants here
 }
 
 impl Eq for Value {}
@@ -129,18 +166,10 @@ impl Ord for Value {
 	}
 }
 
-impl Default for Value {
-	fn default() -> Value {
-		Value::None
-	}
-}
-
 impl From<bool> for Value {
+	#[inline]
 	fn from(v: bool) -> Self {
-		match v {
-			true => Value::True,
-			false => Value::False,
-		}
+		Value::Bool(v)
 	}
 }
 
@@ -162,9 +191,9 @@ impl From<Idiom> for Value {
 	}
 }
 
-impl From<Model> for Value {
-	fn from(v: Model) -> Self {
-		Value::Model(v)
+impl From<Mock> for Value {
+	fn from(v: Mock) -> Self {
+		Value::Mock(v)
 	}
 }
 
@@ -183,6 +212,12 @@ impl From<Thing> for Value {
 impl From<Regex> for Value {
 	fn from(v: Regex) -> Self {
 		Value::Regex(v)
+	}
+}
+
+impl From<Bytes> for Value {
+	fn from(v: Bytes) -> Self {
+		Value::Bytes(v)
 	}
 }
 
@@ -228,15 +263,51 @@ impl From<Duration> for Value {
 	}
 }
 
+impl From<Constant> for Value {
+	fn from(v: Constant) -> Self {
+		Value::Constant(v)
+	}
+}
+
+impl From<Block> for Value {
+	fn from(v: Block) -> Self {
+		Value::Block(Box::new(v))
+	}
+}
+
+impl From<Range> for Value {
+	fn from(v: Range) -> Self {
+		Value::Range(Box::new(v))
+	}
+}
+
 impl From<Edges> for Value {
 	fn from(v: Edges) -> Self {
 		Value::Edges(Box::new(v))
 	}
 }
 
+impl From<Future> for Value {
+	fn from(v: Future) -> Self {
+		Value::Future(Box::new(v))
+	}
+}
+
+impl From<Cast> for Value {
+	fn from(v: Cast) -> Self {
+		Value::Cast(Box::new(v))
+	}
+}
+
 impl From<Function> for Value {
 	fn from(v: Function) -> Self {
 		Value::Function(Box::new(v))
+	}
+}
+
+impl From<Model> for Value {
+	fn from(v: Model) -> Self {
+		Value::MlModel(Box::new(v))
 	}
 }
 
@@ -249,6 +320,12 @@ impl From<Subquery> for Value {
 impl From<Expression> for Value {
 	fn from(v: Expression) -> Self {
 		Value::Expression(Box::new(v))
+	}
+}
+
+impl From<Box<Edges>> for Value {
+	fn from(v: Box<Edges>) -> Self {
+		Value::Edges(v)
 	}
 }
 
@@ -272,6 +349,12 @@ impl From<i32> for Value {
 
 impl From<i64> for Value {
 	fn from(v: i64) -> Self {
+		Value::Number(Number::from(v))
+	}
+}
+
+impl From<i128> for Value {
+	fn from(v: i128) -> Self {
 		Value::Number(Number::from(v))
 	}
 }
@@ -306,6 +389,12 @@ impl From<u64> for Value {
 	}
 }
 
+impl From<u128> for Value {
+	fn from(v: u128) -> Self {
+		Value::Number(Number::from(v))
+	}
+}
+
 impl From<usize> for Value {
 	fn from(v: usize) -> Self {
 		Value::Number(Number::from(v))
@@ -324,21 +413,21 @@ impl From<f64> for Value {
 	}
 }
 
-impl From<BigDecimal> for Value {
-	fn from(v: BigDecimal) -> Self {
+impl From<Decimal> for Value {
+	fn from(v: Decimal) -> Self {
 		Value::Number(Number::from(v))
 	}
 }
 
 impl From<String> for Value {
 	fn from(v: String) -> Self {
-		Value::Strand(Strand::from(v))
+		Self::Strand(Strand::from(v))
 	}
 }
 
 impl From<&str> for Value {
 	fn from(v: &str) -> Self {
-		Value::Strand(Strand::from(v))
+		Self::Strand(Strand::from(v))
 	}
 }
 
@@ -372,8 +461,20 @@ impl From<Operation> for Value {
 	}
 }
 
+impl From<uuid::Uuid> for Value {
+	fn from(v: uuid::Uuid) -> Self {
+		Value::Uuid(Uuid(v))
+	}
+}
+
 impl From<Vec<&str>> for Value {
 	fn from(v: Vec<&str>) -> Self {
+		Value::Array(Array::from(v))
+	}
+}
+
+impl From<Vec<String>> for Value {
+	fn from(v: Vec<String>) -> Self {
 		Value::Array(Array::from(v))
 	}
 }
@@ -386,6 +487,12 @@ impl From<Vec<i32>> for Value {
 
 impl From<Vec<Value>> for Value {
 	fn from(v: Vec<Value>) -> Self {
+		Value::Array(Array::from(v))
+	}
+}
+
+impl From<Vec<Number>> for Value {
+	fn from(v: Vec<Number>) -> Self {
 		Value::Array(Array::from(v))
 	}
 }
@@ -430,18 +537,235 @@ impl From<Id> for Value {
 	fn from(v: Id) -> Self {
 		match v {
 			Id::Number(v) => v.into(),
-			Id::String(v) => Strand::from(v).into(),
+			Id::String(v) => v.into(),
+			Id::Array(v) => v.into(),
+			Id::Object(v) => v.into(),
+			Id::Generate(v) => match v {
+				Gen::Rand => Id::rand().into(),
+				Gen::Ulid => Id::ulid().into(),
+				Gen::Uuid => Id::uuid().into(),
+			},
 		}
 	}
 }
 
-impl FromIterator<Response> for Vec<Value> {
-	fn from_iter<I: IntoIterator<Item = Response>>(iter: I) -> Self {
-		let mut c: Vec<Value> = vec![];
-		for i in iter {
-			c.push(i.into())
+impl TryFrom<Value> for i8 {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Number(x) => x.try_into(),
+			_ => Err(Error::TryFrom(value.to_string(), "i8")),
 		}
-		c
+	}
+}
+
+impl TryFrom<Value> for i16 {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Number(x) => x.try_into(),
+			_ => Err(Error::TryFrom(value.to_string(), "i16")),
+		}
+	}
+}
+
+impl TryFrom<Value> for i32 {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Number(x) => x.try_into(),
+			_ => Err(Error::TryFrom(value.to_string(), "i32")),
+		}
+	}
+}
+
+impl TryFrom<Value> for i64 {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Number(x) => x.try_into(),
+			_ => Err(Error::TryFrom(value.to_string(), "i64")),
+		}
+	}
+}
+
+impl TryFrom<Value> for i128 {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Number(x) => x.try_into(),
+			_ => Err(Error::TryFrom(value.to_string(), "i128")),
+		}
+	}
+}
+
+impl TryFrom<Value> for u8 {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Number(x) => x.try_into(),
+			_ => Err(Error::TryFrom(value.to_string(), "u8")),
+		}
+	}
+}
+
+impl TryFrom<Value> for u16 {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Number(x) => x.try_into(),
+			_ => Err(Error::TryFrom(value.to_string(), "u16")),
+		}
+	}
+}
+
+impl TryFrom<Value> for u32 {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Number(x) => x.try_into(),
+			_ => Err(Error::TryFrom(value.to_string(), "u32")),
+		}
+	}
+}
+
+impl TryFrom<Value> for u64 {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Number(x) => x.try_into(),
+			_ => Err(Error::TryFrom(value.to_string(), "u64")),
+		}
+	}
+}
+
+impl TryFrom<Value> for u128 {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Number(x) => x.try_into(),
+			_ => Err(Error::TryFrom(value.to_string(), "u128")),
+		}
+	}
+}
+
+impl TryFrom<Value> for f32 {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Number(x) => x.try_into(),
+			_ => Err(Error::TryFrom(value.to_string(), "f32")),
+		}
+	}
+}
+
+impl TryFrom<Value> for f64 {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Number(x) => x.try_into(),
+			_ => Err(Error::TryFrom(value.to_string(), "f64")),
+		}
+	}
+}
+
+impl TryFrom<Value> for Decimal {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Number(x) => x.try_into(),
+			_ => Err(Error::TryFrom(value.to_string(), "Decimal")),
+		}
+	}
+}
+
+impl TryFrom<Value> for String {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Strand(x) => Ok(x.into()),
+			_ => Err(Error::TryFrom(value.to_string(), "String")),
+		}
+	}
+}
+
+impl TryFrom<Value> for bool {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Bool(v) => Ok(v),
+			_ => Err(Error::TryFrom(value.to_string(), "bool")),
+		}
+	}
+}
+
+impl TryFrom<Value> for std::time::Duration {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Duration(x) => Ok(x.into()),
+			_ => Err(Error::TryFrom(value.to_string(), "time::Duration")),
+		}
+	}
+}
+
+impl TryFrom<Value> for DateTime<Utc> {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Datetime(x) => Ok(x.into()),
+			_ => Err(Error::TryFrom(value.to_string(), "chrono::DateTime<Utc>")),
+		}
+	}
+}
+
+impl TryFrom<Value> for uuid::Uuid {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Uuid(x) => Ok(x.into()),
+			_ => Err(Error::TryFrom(value.to_string(), "uuid::Uuid")),
+		}
+	}
+}
+
+impl TryFrom<Value> for Vec<Value> {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Array(x) => Ok(x.into()),
+			_ => Err(Error::TryFrom(value.to_string(), "Vec<Value>")),
+		}
+	}
+}
+
+impl TryFrom<Value> for Number {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Number(x) => Ok(x),
+			_ => Err(Error::TryFrom(value.to_string(), "Number")),
+		}
+	}
+}
+
+impl TryFrom<Value> for Datetime {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Datetime(x) => Ok(x),
+			_ => Err(Error::TryFrom(value.to_string(), "Datetime")),
+		}
+	}
+}
+
+impl TryFrom<Value> for Object {
+	type Error = Error;
+	fn try_from(value: Value) -> Result<Self, Self::Error> {
+		match value {
+			Value::Object(x) => Ok(x),
+			_ => Err(Error::TryFrom(value.to_string(), "Object")),
+		}
 	}
 }
 
@@ -450,6 +774,7 @@ impl Value {
 	// Initial record value
 	// -----------------------------------
 
+	/// Create an empty Object Value
 	pub fn base() -> Self {
 		Value::Object(Object::default())
 	}
@@ -458,15 +783,16 @@ impl Value {
 	// Builtin types
 	// -----------------------------------
 
+	/// Convert this Value to a Result
 	pub fn ok(self) -> Result<Value, Error> {
 		Ok(self)
 	}
 
-	pub fn output(self) -> Option<Value> {
+	/// Convert this Value to an Option
+	pub fn some(self) -> Option<Value> {
 		match self {
 			Value::None => None,
-			Value::Void => None,
-			_ => Some(self),
+			val => Some(val),
 		}
 	}
 
@@ -474,47 +800,51 @@ impl Value {
 	// Simple value detection
 	// -----------------------------------
 
-	pub fn is_none(&self) -> bool {
-		matches!(self, Value::None | Value::Void | Value::Null)
-	}
-
-	pub fn is_void(&self) -> bool {
-		matches!(self, Value::None | Value::Void)
-	}
-
-	pub fn is_null(&self) -> bool {
+	/// Check if this Value is NONE or NULL
+	pub fn is_none_or_null(&self) -> bool {
 		matches!(self, Value::None | Value::Null)
 	}
 
+	/// Check if this Value is NONE
+	pub fn is_none(&self) -> bool {
+		matches!(self, Value::None)
+	}
+
+	/// Check if this Value is NULL
+	pub fn is_null(&self) -> bool {
+		matches!(self, Value::Null)
+	}
+
+	/// Check if this Value not NONE or NULL
 	pub fn is_some(&self) -> bool {
-		!self.is_none()
+		!self.is_none() && !self.is_null()
 	}
 
+	/// Check if this Value is a boolean value
+	pub fn is_bool(&self) -> bool {
+		matches!(self, Value::Bool(_))
+	}
+
+	/// Check if this Value is TRUE or 'true'
 	pub fn is_true(&self) -> bool {
-		match self {
-			Value::True => true,
-			Value::Strand(v) => v.to_ascii_lowercase() == "true",
-			_ => false,
-		}
+		matches!(self, Value::Bool(true))
 	}
 
+	/// Check if this Value is FALSE or 'false'
 	pub fn is_false(&self) -> bool {
-		match self {
-			Value::False => true,
-			Value::Strand(v) => v.to_ascii_lowercase() == "false",
-			_ => false,
-		}
+		matches!(self, Value::Bool(false))
 	}
 
+	/// Check if this Value is truthy
 	pub fn is_truthy(&self) -> bool {
 		match self {
-			Value::True => true,
-			Value::False => false,
+			Value::Bool(v) => *v,
+			Value::Uuid(_) => true,
 			Value::Thing(_) => true,
 			Value::Geometry(_) => true,
 			Value::Array(v) => !v.is_empty(),
 			Value::Object(v) => !v.is_empty(),
-			Value::Strand(v) => !v.is_empty() && v.to_ascii_lowercase() != "false",
+			Value::Strand(v) => !v.is_empty() && !v.eq_ignore_ascii_case("false"),
 			Value::Number(v) => v.is_truthy(),
 			Value::Duration(v) => v.as_nanos() > 0,
 			Value::Datetime(v) => v.timestamp() > 0,
@@ -522,55 +852,157 @@ impl Value {
 		}
 	}
 
+	/// Check if this Value is a UUID
 	pub fn is_uuid(&self) -> bool {
 		matches!(self, Value::Uuid(_))
 	}
 
+	/// Check if this Value is a Thing
 	pub fn is_thing(&self) -> bool {
 		matches!(self, Value::Thing(_))
 	}
 
+	/// Check if this Value is a Mock
+	pub fn is_mock(&self) -> bool {
+		matches!(self, Value::Mock(_))
+	}
+
+	/// Check if this Value is a Range
+	pub fn is_range(&self) -> bool {
+		matches!(self, Value::Range(_))
+	}
+
+	/// Check if this Value is a Table
+	pub fn is_table(&self) -> bool {
+		matches!(self, Value::Table(_))
+	}
+
+	/// Check if this Value is a Strand
 	pub fn is_strand(&self) -> bool {
 		matches!(self, Value::Strand(_))
 	}
 
+	/// Check if this Value is a Query
+	pub fn is_query(&self) -> bool {
+		matches!(self, Value::Query(_))
+	}
+
+	/// Check if this Value is a float Number
+	pub fn is_bytes(&self) -> bool {
+		matches!(self, Value::Bytes(_))
+	}
+
+	/// Check if this Value is an Array
 	pub fn is_array(&self) -> bool {
 		matches!(self, Value::Array(_))
 	}
 
+	/// Check if this Value is an Object
 	pub fn is_object(&self) -> bool {
 		matches!(self, Value::Object(_))
 	}
 
-	pub fn is_type_record(&self, types: &[Table]) -> bool {
+	/// Check if this Value is a Number
+	pub fn is_number(&self) -> bool {
+		matches!(self, Value::Number(_))
+	}
+
+	/// Check if this Value is a Datetime
+	pub fn is_datetime(&self) -> bool {
+		matches!(self, Value::Datetime(_))
+	}
+
+	/// Check if this Value is a Duration
+	pub fn is_duration(&self) -> bool {
+		matches!(self, Value::Duration(_))
+	}
+
+	/// Check if this Value is a Thing
+	pub fn is_record(&self) -> bool {
+		matches!(self, Value::Thing(_))
+	}
+
+	/// Check if this Value is a Geometry
+	pub fn is_geometry(&self) -> bool {
+		matches!(self, Value::Geometry(_))
+	}
+
+	/// Check if this Value is an int Number
+	pub fn is_int(&self) -> bool {
+		matches!(self, Value::Number(Number::Int(_)))
+	}
+
+	/// Check if this Value is a float Number
+	pub fn is_float(&self) -> bool {
+		matches!(self, Value::Number(Number::Float(_)))
+	}
+
+	/// Check if this Value is a decimal Number
+	pub fn is_decimal(&self) -> bool {
+		matches!(self, Value::Number(Number::Decimal(_)))
+	}
+
+	/// Check if this Value is a Number but is a NAN
+	pub fn is_nan(&self) -> bool {
+		matches!(self, Value::Number(v) if v.is_nan())
+	}
+
+	/// Check if this Value is a Number and is an integer
+	pub fn is_integer(&self) -> bool {
+		matches!(self, Value::Number(v) if v.is_integer())
+	}
+
+	/// Check if this Value is a Number and is positive
+	pub fn is_positive(&self) -> bool {
+		matches!(self, Value::Number(v) if v.is_positive())
+	}
+
+	/// Check if this Value is a Number and is negative
+	pub fn is_negative(&self) -> bool {
+		matches!(self, Value::Number(v) if v.is_negative())
+	}
+
+	/// Check if this Value is a Number and is zero or positive
+	pub fn is_zero_or_positive(&self) -> bool {
+		matches!(self, Value::Number(v) if v.is_zero_or_positive())
+	}
+
+	/// Check if this Value is a Number and is zero or negative
+	pub fn is_zero_or_negative(&self) -> bool {
+		matches!(self, Value::Number(v) if v.is_zero_or_negative())
+	}
+
+	/// Check if this Value is a Thing of a specific type
+	pub fn is_record_type(&self, types: &[Table]) -> bool {
 		match self {
-			Value::Thing(v) => types.iter().any(|tb| tb.0 == v.tb),
+			Value::Thing(v) => types.is_empty() || types.iter().any(|tb| tb.0 == v.tb),
 			_ => false,
 		}
 	}
 
-	pub fn is_type_geometry(&self, types: &[String]) -> bool {
+	/// Check if this Value is a Geometry of a specific type
+	pub fn is_geometry_type(&self, types: &[String]) -> bool {
 		match self {
 			Value::Geometry(Geometry::Point(_)) => {
-				types.iter().any(|t| &t[..] == "feature" || &t[..] == "point")
+				types.iter().any(|t| matches!(t.as_str(), "feature" | "point"))
 			}
 			Value::Geometry(Geometry::Line(_)) => {
-				types.iter().any(|t| &t[..] == "feature" || &t[..] == "line")
+				types.iter().any(|t| matches!(t.as_str(), "feature" | "line"))
 			}
 			Value::Geometry(Geometry::Polygon(_)) => {
-				types.iter().any(|t| &t[..] == "feature" || &t[..] == "polygon")
+				types.iter().any(|t| matches!(t.as_str(), "feature" | "polygon"))
 			}
 			Value::Geometry(Geometry::MultiPoint(_)) => {
-				types.iter().any(|t| &t[..] == "feature" || &t[..] == "multipoint")
+				types.iter().any(|t| matches!(t.as_str(), "feature" | "multipoint"))
 			}
 			Value::Geometry(Geometry::MultiLine(_)) => {
-				types.iter().any(|t| &t[..] == "feature" || &t[..] == "multiline")
+				types.iter().any(|t| matches!(t.as_str(), "feature" | "multiline"))
 			}
 			Value::Geometry(Geometry::MultiPolygon(_)) => {
-				types.iter().any(|t| &t[..] == "feature" || &t[..] == "multipolygon")
+				types.iter().any(|t| matches!(t.as_str(), "feature" | "multipolygon"))
 			}
 			Value::Geometry(Geometry::Collection(_)) => {
-				types.iter().any(|t| &t[..] == "feature" || &t[..] == "collection")
+				types.iter().any(|t| matches!(t.as_str(), "feature" | "collection"))
 			}
 			_ => false,
 		}
@@ -580,76 +1012,22 @@ impl Value {
 	// Simple conversion of value
 	// -----------------------------------
 
-	pub fn as_int(self) -> i64 {
-		match self {
-			Value::True => 1,
-			Value::Strand(v) => v.parse::<i64>().unwrap_or(0),
-			Value::Number(v) => v.as_int(),
-			Value::Duration(v) => v.as_secs() as i64,
-			Value::Datetime(v) => v.timestamp(),
-			_ => 0,
-		}
-	}
-
-	pub fn as_float(self) -> f64 {
-		match self {
-			Value::True => 1.0,
-			Value::Strand(v) => v.parse::<f64>().unwrap_or(0.0),
-			Value::Number(v) => v.as_float(),
-			Value::Duration(v) => v.as_secs() as f64,
-			Value::Datetime(v) => v.timestamp() as f64,
-			_ => 0.0,
-		}
-	}
-
-	pub fn as_decimal(self) -> BigDecimal {
-		match self {
-			Value::True => BigDecimal::from(1),
-			Value::Number(v) => v.as_decimal(),
-			Value::Strand(v) => BigDecimal::from_str(v.as_str()).unwrap_or_default(),
-			Value::Duration(v) => v.as_secs().into(),
-			Value::Datetime(v) => v.timestamp().into(),
-			_ => BigDecimal::default(),
-		}
-	}
-
-	pub fn as_number(self) -> Number {
-		match self {
-			Value::True => Number::from(1),
-			Value::Number(v) => v,
-			Value::Strand(v) => Number::from(v.as_str()),
-			Value::Duration(v) => v.as_secs().into(),
-			Value::Datetime(v) => v.timestamp().into(),
-			_ => Number::default(),
-		}
-	}
-
-	pub fn as_strand(self) -> Strand {
-		match self {
-			Value::Strand(v) => v,
-			_ => Strand::from(self.to_string()),
-		}
-	}
-
-	pub fn as_datetime(self) -> Datetime {
-		match self {
-			Value::Strand(v) => Datetime::from(v.as_str()),
-			Value::Datetime(v) => v,
-			_ => Datetime::default(),
-		}
-	}
-
-	pub fn as_duration(self) -> Duration {
-		match self {
-			Value::Strand(v) => Duration::from(v.as_str()),
-			Value::Duration(v) => v,
-			_ => Duration::default(),
-		}
-	}
-
+	/// Convert this Value into a String
 	pub fn as_string(self) -> String {
 		match self {
-			Value::Strand(v) => v.as_string(),
+			Value::Strand(v) => v.0,
+			Value::Uuid(v) => v.to_raw(),
+			Value::Datetime(v) => v.to_raw(),
+			_ => self.to_string(),
+		}
+	}
+
+	/// Converts this Value into an unquoted String
+	pub fn as_raw_string(self) -> String {
+		match self {
+			Value::Strand(v) => v.0,
+			Value::Uuid(v) => v.to_raw(),
+			Value::Datetime(v) => v.to_raw(),
 			_ => self.to_string(),
 		}
 	}
@@ -658,56 +1036,50 @@ impl Value {
 	// Expensive conversion of value
 	// -----------------------------------
 
-	pub fn to_number(&self) -> Number {
+	/// Converts this Value into an unquoted String
+	pub fn to_raw_string(&self) -> String {
 		match self {
-			Value::True => Number::from(1),
-			Value::Number(v) => v.clone(),
-			Value::Strand(v) => Number::from(v.as_str()),
-			Value::Duration(v) => v.as_secs().into(),
-			Value::Datetime(v) => v.timestamp().into(),
-			_ => Number::default(),
+			Value::Strand(v) => v.0.to_owned(),
+			Value::Uuid(v) => v.to_raw(),
+			Value::Datetime(v) => v.to_raw(),
+			_ => self.to_string(),
 		}
 	}
 
-	pub fn to_strand(&self) -> Strand {
-		match self {
-			Value::Strand(v) => v.clone(),
-			_ => Strand::from(self.to_string()),
-		}
-	}
-
-	pub fn to_datetime(&self) -> Datetime {
-		match self {
-			Value::Strand(v) => Datetime::from(v.as_str()),
-			Value::Datetime(v) => v.clone(),
-			_ => Datetime::default(),
-		}
-	}
-
-	pub fn to_duration(&self) -> Duration {
-		match self {
-			Value::Strand(v) => Duration::from(v.as_str()),
-			Value::Duration(v) => v.clone(),
-			_ => Duration::default(),
-		}
-	}
-
+	/// Converts this Value into a field name
 	pub fn to_idiom(&self) -> Idiom {
 		match self {
-			Value::Param(v) => v.simplify(),
 			Value::Idiom(v) => v.simplify(),
+			Value::Param(v) => v.to_raw().into(),
 			Value::Strand(v) => v.0.to_string().into(),
 			Value::Datetime(v) => v.0.to_string().into(),
-			Value::Function(v) => match v.as_ref() {
-				Function::Future(_) => "fn::future".to_string().into(),
-				Function::Script(_, _) => "fn::script".to_string().into(),
-				Function::Normal(f, _) => f.to_string().into(),
-				Function::Cast(_, v) => v.to_idiom(),
-			},
+			Value::Future(_) => "future".to_string().into(),
+			Value::Function(v) => v.to_idiom(),
 			_ => self.to_string().into(),
 		}
 	}
 
+	/// Returns if this value can be the start of a idiom production.
+	pub fn can_start_idiom(&self) -> bool {
+		match self {
+			Value::Function(x) => !x.is_script(),
+			Value::MlModel(_)
+			| Value::Subquery(_)
+			| Value::Constant(_)
+			| Value::Datetime(_)
+			| Value::Duration(_)
+			| Value::Uuid(_)
+			| Value::Number(_)
+			| Value::Object(_)
+			| Value::Array(_)
+			| Value::Param(_)
+			| Value::Edges(_)
+			| Value::Thing(_) => true,
+			_ => false,
+		}
+	}
+
+	/// Try to convert this Value into a set of JSONPatch operations
 	pub fn to_operations(&self) -> Result<Vec<Operation>, Error> {
 		match self {
 			Value::Array(v) => v
@@ -725,111 +1097,1168 @@ impl Value {
 		}
 	}
 
+	/// Converts a `surrealdb::sq::Value` into a `serde_json::Value`
+	///
+	/// This converts certain types like `Thing` into their simpler formats
+	/// instead of the format used internally by SurrealDB.
+	pub fn into_json(self) -> Json {
+		self.into()
+	}
+
 	// -----------------------------------
-	// Simple conversion of value
+	// Simple conversion of values
 	// -----------------------------------
 
-	pub fn make_bool(self) -> Value {
+	/// Treat a string as a table name
+	pub fn could_be_table(self) -> Value {
 		match self {
-			Value::True | Value::False => self,
-			_ => self.is_truthy().into(),
+			Value::Strand(v) => Table::from(v.0).into(),
+			_ => self,
 		}
 	}
 
-	pub fn make_int(self) -> Value {
+	// -----------------------------------
+	// Simple output of value type
+	// -----------------------------------
+
+	/// Treat a string as a table name
+	pub fn kindof(&self) -> &'static str {
 		match self {
-			Value::Number(Number::Int(_)) => self,
-			_ => self.as_int().into(),
+			Self::None => "none",
+			Self::Null => "null",
+			Self::Bool(_) => "bool",
+			Self::Uuid(_) => "uuid",
+			Self::Array(_) => "array",
+			Self::Object(_) => "object",
+			Self::Strand(_) => "string",
+			Self::Duration(_) => "duration",
+			Self::Datetime(_) => "datetime",
+			Self::Number(Number::Int(_)) => "int",
+			Self::Number(Number::Float(_)) => "float",
+			Self::Number(Number::Decimal(_)) => "decimal",
+			Self::Geometry(Geometry::Point(_)) => "geometry<point>",
+			Self::Geometry(Geometry::Line(_)) => "geometry<line>",
+			Self::Geometry(Geometry::Polygon(_)) => "geometry<polygon>",
+			Self::Geometry(Geometry::MultiPoint(_)) => "geometry<multipoint>",
+			Self::Geometry(Geometry::MultiLine(_)) => "geometry<multiline>",
+			Self::Geometry(Geometry::MultiPolygon(_)) => "geometry<multipolygon>",
+			Self::Geometry(Geometry::Collection(_)) => "geometry<collection>",
+			Self::Bytes(_) => "bytes",
+			_ => "incorrect type",
 		}
 	}
 
-	pub fn make_float(self) -> Value {
-		match self {
-			Value::Number(Number::Float(_)) => self,
-			_ => self.as_float().into(),
-		}
-	}
+	// -----------------------------------
+	// Simple type coercion of values
+	// -----------------------------------
 
-	pub fn make_decimal(self) -> Value {
-		match self {
-			Value::Number(Number::Decimal(_)) => self,
-			_ => self.as_decimal().into(),
-		}
-	}
-
-	pub fn make_number(self) -> Value {
-		match self {
-			Value::Number(_) => self,
-			_ => self.as_number().into(),
-		}
-	}
-
-	pub fn make_strand(self) -> Value {
-		match self {
-			Value::Strand(_) => self,
-			_ => self.as_strand().into(),
-		}
-	}
-
-	pub fn make_datetime(self) -> Value {
-		match self {
-			Value::Datetime(_) => self,
-			_ => self.as_datetime().into(),
-		}
-	}
-
-	pub fn make_duration(self) -> Value {
-		match self {
-			Value::Duration(_) => self,
-			_ => self.as_duration().into(),
-		}
-	}
-
-	pub fn make_table(self) -> Value {
-		match self {
-			Value::Table(_) => self,
-			Value::Strand(v) => Value::Table(Table(v.0)),
-			_ => Value::Table(Table(self.as_strand().0)),
-		}
-	}
-
-	pub fn make_table_or_thing(self) -> Value {
-		match self {
-			Value::Table(_) => self,
-			Value::Thing(_) => self,
-			Value::Strand(v) => Value::Table(Table(v.0)),
-			_ => Value::Table(Table(self.as_strand().0)),
-		}
-	}
-
-	pub fn convert_to(self, kind: &Kind) -> Value {
-		match kind {
-			Kind::Any => self,
-			Kind::Bool => self.make_bool(),
-			Kind::Int => self.make_int(),
-			Kind::Float => self.make_float(),
-			Kind::Decimal => self.make_decimal(),
-			Kind::Number => self.make_number(),
-			Kind::String => self.make_strand(),
-			Kind::Datetime => self.make_datetime(),
-			Kind::Duration => self.make_duration(),
-			Kind::Array => match self {
-				Value::Array(_) => self,
-				_ => Value::None,
+	/// Try to coerce this value to the specified `Kind`
+	pub(crate) fn coerce_to(self, kind: &Kind) -> Result<Value, Error> {
+		// Attempt to convert to the desired type
+		let res = match kind {
+			Kind::Any => Ok(self),
+			Kind::Null => self.coerce_to_null(),
+			Kind::Bool => self.coerce_to_bool().map(Value::from),
+			Kind::Int => self.coerce_to_int().map(Value::from),
+			Kind::Float => self.coerce_to_float().map(Value::from),
+			Kind::Decimal => self.coerce_to_decimal().map(Value::from),
+			Kind::Number => self.coerce_to_number().map(Value::from),
+			Kind::String => self.coerce_to_strand().map(Value::from),
+			Kind::Datetime => self.coerce_to_datetime().map(Value::from),
+			Kind::Duration => self.coerce_to_duration().map(Value::from),
+			Kind::Object => self.coerce_to_object().map(Value::from),
+			Kind::Point => self.coerce_to_point().map(Value::from),
+			Kind::Bytes => self.coerce_to_bytes().map(Value::from),
+			Kind::Uuid => self.coerce_to_uuid().map(Value::from),
+			Kind::Set(t, l) => match l {
+				Some(l) => self.coerce_to_set_type_len(t, l).map(Value::from),
+				None => self.coerce_to_set_type(t).map(Value::from),
 			},
-			Kind::Object => match self {
-				Value::Object(_) => self,
-				_ => Value::None,
+			Kind::Array(t, l) => match l {
+				Some(l) => self.coerce_to_array_type_len(t, l).map(Value::from),
+				None => self.coerce_to_array_type(t).map(Value::from),
 			},
-			Kind::Record(t) => match self.is_type_record(t) {
-				true => self,
-				_ => Value::None,
+			Kind::Record(t) => match t.is_empty() {
+				true => self.coerce_to_record().map(Value::from),
+				false => self.coerce_to_record_type(t).map(Value::from),
 			},
-			Kind::Geometry(t) => match self.is_type_geometry(t) {
-				true => self,
-				_ => Value::None,
+			Kind::Geometry(t) => match t.is_empty() {
+				true => self.coerce_to_geometry().map(Value::from),
+				false => self.coerce_to_geometry_type(t).map(Value::from),
 			},
+			Kind::Option(k) => match self {
+				Self::None => Ok(Self::None),
+				v => v.coerce_to(k),
+			},
+			Kind::Either(k) => {
+				let mut val = self;
+				for k in k {
+					match val.coerce_to(k) {
+						Err(Error::CoerceTo {
+							from,
+							..
+						}) => val = from,
+						Err(e) => return Err(e),
+						Ok(v) => return Ok(v),
+					}
+				}
+				Err(Error::CoerceTo {
+					from: val,
+					into: kind.to_string(),
+				})
+			}
+		};
+		// Check for any conversion errors
+		match res {
+			// There was a conversion error
+			Err(Error::CoerceTo {
+				from,
+				..
+			}) => Err(Error::CoerceTo {
+				from,
+				into: kind.to_string(),
+			}),
+			// There was a different error
+			Err(e) => Err(e),
+			// Everything converted ok
+			Ok(v) => Ok(v),
 		}
+	}
+
+	/// Try to coerce this value to an `i64`
+	pub(crate) fn coerce_to_i64(self) -> Result<i64, Error> {
+		match self {
+			// Allow any int number
+			Value::Number(Number::Int(v)) => Ok(v),
+			// Attempt to convert an float number
+			Value::Number(Number::Float(v)) if v.fract() == 0.0 => Ok(v as i64),
+			// Attempt to convert a decimal number
+			Value::Number(Number::Decimal(v)) if v.is_integer() => match v.try_into() {
+				// The Decimal can be represented as an i64
+				Ok(v) => Ok(v),
+				// The Decimal is out of bounds
+				_ => Err(Error::CoerceTo {
+					from: self,
+					into: "i64".into(),
+				}),
+			},
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "i64".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to an `u64`
+	pub(crate) fn coerce_to_u64(self) -> Result<u64, Error> {
+		match self {
+			// Allow any int number
+			Value::Number(Number::Int(v)) => Ok(v as u64),
+			// Attempt to convert an float number
+			Value::Number(Number::Float(v)) if v.fract() == 0.0 => Ok(v as u64),
+			// Attempt to convert a decimal number
+			Value::Number(Number::Decimal(v)) if v.is_integer() => match v.try_into() {
+				// The Decimal can be represented as an u64
+				Ok(v) => Ok(v),
+				// The Decimal is out of bounds
+				_ => Err(Error::CoerceTo {
+					from: self,
+					into: "u64".into(),
+				}),
+			},
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "u64".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to an `f64`
+	pub(crate) fn coerce_to_f64(self) -> Result<f64, Error> {
+		match self {
+			// Allow any float number
+			Value::Number(Number::Float(v)) => Ok(v),
+			// Attempt to convert an int number
+			Value::Number(Number::Int(v)) => Ok(v as f64),
+			// Attempt to convert a decimal number
+			Value::Number(Number::Decimal(v)) => match v.try_into() {
+				// The Decimal can be represented as a f64
+				Ok(v) => Ok(v),
+				// Ths Decimal loses precision
+				_ => Err(Error::CoerceTo {
+					from: self,
+					into: "f64".into(),
+				}),
+			},
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "f64".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to a `null`
+	pub(crate) fn coerce_to_null(self) -> Result<Value, Error> {
+		match self {
+			// Allow any null value
+			Value::Null => Ok(Value::Null),
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "null".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to a `bool`
+	pub(crate) fn coerce_to_bool(self) -> Result<bool, Error> {
+		match self {
+			// Allow any boolean value
+			Value::Bool(v) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "bool".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to an integer `Number`
+	pub(crate) fn coerce_to_int(self) -> Result<Number, Error> {
+		match self {
+			// Allow any int number
+			Value::Number(v) if v.is_int() => Ok(v),
+			// Attempt to convert an float number
+			Value::Number(Number::Float(v)) if v.fract() == 0.0 => Ok(Number::Int(v as i64)),
+			// Attempt to convert a decimal number
+			Value::Number(Number::Decimal(v)) if v.is_integer() => match v.to_i64() {
+				// The Decimal can be represented as an Int
+				Some(v) => Ok(Number::Int(v)),
+				// The Decimal is out of bounds
+				_ => Err(Error::CoerceTo {
+					from: self,
+					into: "int".into(),
+				}),
+			},
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "int".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to a float `Number`
+	pub(crate) fn coerce_to_float(self) -> Result<Number, Error> {
+		match self {
+			// Allow any float number
+			Value::Number(v) if v.is_float() => Ok(v),
+			// Attempt to convert an int number
+			Value::Number(Number::Int(v)) => Ok(Number::Float(v as f64)),
+			// Attempt to convert a decimal number
+			Value::Number(Number::Decimal(ref v)) => match v.to_f64() {
+				// The Decimal can be represented as a Float
+				Some(v) => Ok(Number::Float(v)),
+				// Ths BigDecimal loses precision
+				None => Err(Error::CoerceTo {
+					from: self,
+					into: "float".into(),
+				}),
+			},
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "float".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to a decimal `Number`
+	pub(crate) fn coerce_to_decimal(self) -> Result<Number, Error> {
+		match self {
+			// Allow any decimal number
+			Value::Number(v) if v.is_decimal() => Ok(v),
+			// Attempt to convert an int number
+			Value::Number(Number::Int(v)) => match Decimal::from_i64(v) {
+				// The Int can be represented as a Decimal
+				Some(v) => Ok(Number::Decimal(v)),
+				// Ths Int does not convert to a Decimal
+				None => Err(Error::CoerceTo {
+					from: self,
+					into: "decimal".into(),
+				}),
+			},
+			// Attempt to convert an float number
+			Value::Number(Number::Float(v)) => match Decimal::from_f64(v) {
+				// The Float can be represented as a Decimal
+				Some(v) => Ok(Number::Decimal(v)),
+				// Ths Float does not convert to a Decimal
+				None => Err(Error::CoerceTo {
+					from: self,
+					into: "decimal".into(),
+				}),
+			},
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "decimal".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to a `Number`
+	pub(crate) fn coerce_to_number(self) -> Result<Number, Error> {
+		match self {
+			// Allow any number
+			Value::Number(v) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "number".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to a `String`
+	pub(crate) fn coerce_to_string(self) -> Result<String, Error> {
+		match self {
+			// Allow any uuid value
+			Value::Uuid(v) => Ok(v.to_raw()),
+			// Allow any datetime value
+			Value::Datetime(v) => Ok(v.to_raw()),
+			// Allow any string value
+			Value::Strand(v) => Ok(v.as_string()),
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "string".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to a `Strand`
+	pub(crate) fn coerce_to_strand(self) -> Result<Strand, Error> {
+		match self {
+			// Allow any uuid value
+			Value::Uuid(v) => Ok(v.to_raw().into()),
+			// Allow any datetime value
+			Value::Datetime(v) => Ok(v.to_raw().into()),
+			// Allow any string value
+			Value::Strand(v) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "string".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to a `Uuid`
+	pub(crate) fn coerce_to_uuid(self) -> Result<Uuid, Error> {
+		match self {
+			// Uuids are allowed
+			Value::Uuid(v) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "uuid".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to a `Datetime`
+	pub(crate) fn coerce_to_datetime(self) -> Result<Datetime, Error> {
+		match self {
+			// Datetimes are allowed
+			Value::Datetime(v) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "datetime".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to a `Duration`
+	pub(crate) fn coerce_to_duration(self) -> Result<Duration, Error> {
+		match self {
+			// Durations are allowed
+			Value::Duration(v) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "duration".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to a `Bytes`
+	pub(crate) fn coerce_to_bytes(self) -> Result<Bytes, Error> {
+		match self {
+			// Bytes are allowed
+			Value::Bytes(v) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "bytes".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to an `Object`
+	pub(crate) fn coerce_to_object(self) -> Result<Object, Error> {
+		match self {
+			// Objects are allowed
+			Value::Object(v) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "object".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to an `Array`
+	pub(crate) fn coerce_to_array(self) -> Result<Array, Error> {
+		match self {
+			// Arrays are allowed
+			Value::Array(v) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "array".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to an `Geometry` point
+	pub(crate) fn coerce_to_point(self) -> Result<Geometry, Error> {
+		match self {
+			// Geometry points are allowed
+			Value::Geometry(Geometry::Point(v)) => Ok(v.into()),
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "point".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to a Record or `Thing`
+	pub(crate) fn coerce_to_record(self) -> Result<Thing, Error> {
+		match self {
+			// Records are allowed
+			Value::Thing(v) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "record".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to an `Geometry` type
+	pub(crate) fn coerce_to_geometry(self) -> Result<Geometry, Error> {
+		match self {
+			// Geometries are allowed
+			Value::Geometry(v) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "geometry".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to a Record of a certain type
+	pub(crate) fn coerce_to_record_type(self, val: &[Table]) -> Result<Thing, Error> {
+		match self {
+			// Records are allowed if correct type
+			Value::Thing(v) if self.is_record_type(val) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "record".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to a `Geometry` of a certain type
+	pub(crate) fn coerce_to_geometry_type(self, val: &[String]) -> Result<Geometry, Error> {
+		match self {
+			// Geometries are allowed if correct type
+			Value::Geometry(v) if self.is_geometry_type(val) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::CoerceTo {
+				from: self,
+				into: "geometry".into(),
+			}),
+		}
+	}
+
+	/// Try to coerce this value to an `Array` of a certain type
+	pub(crate) fn coerce_to_array_type(self, kind: &Kind) -> Result<Array, Error> {
+		self.coerce_to_array()?
+			.into_iter()
+			.map(|value| value.coerce_to(kind))
+			.collect::<Result<Array, Error>>()
+			.map_err(|e| match e {
+				Error::CoerceTo {
+					from,
+					..
+				} => Error::CoerceTo {
+					from,
+					into: format!("array<{kind}>"),
+				},
+				e => e,
+			})
+	}
+
+	/// Try to coerce this value to an `Array` of a certain type, and length
+	pub(crate) fn coerce_to_array_type_len(self, kind: &Kind, len: &u64) -> Result<Array, Error> {
+		self.coerce_to_array()?
+			.into_iter()
+			.map(|value| value.coerce_to(kind))
+			.collect::<Result<Array, Error>>()
+			.map_err(|e| match e {
+				Error::CoerceTo {
+					from,
+					..
+				} => Error::CoerceTo {
+					from,
+					into: format!("array<{kind}, {len}>"),
+				},
+				e => e,
+			})
+			.and_then(|v| match v.len() {
+				v if v > *len as usize => Err(Error::LengthInvalid {
+					kind: format!("array<{kind}, {len}>"),
+					size: v,
+				}),
+				_ => Ok(v),
+			})
+	}
+
+	/// Try to coerce this value to an `Array` of a certain type, unique values
+	pub(crate) fn coerce_to_set_type(self, kind: &Kind) -> Result<Array, Error> {
+		self.coerce_to_array()?
+			.uniq()
+			.into_iter()
+			.map(|value| value.coerce_to(kind))
+			.collect::<Result<Array, Error>>()
+			.map_err(|e| match e {
+				Error::CoerceTo {
+					from,
+					..
+				} => Error::CoerceTo {
+					from,
+					into: format!("set<{kind}>"),
+				},
+				e => e,
+			})
+	}
+
+	/// Try to coerce this value to an `Array` of a certain type, unique values, and length
+	pub(crate) fn coerce_to_set_type_len(self, kind: &Kind, len: &u64) -> Result<Array, Error> {
+		self.coerce_to_array()?
+			.uniq()
+			.into_iter()
+			.map(|value| value.coerce_to(kind))
+			.collect::<Result<Array, Error>>()
+			.map_err(|e| match e {
+				Error::CoerceTo {
+					from,
+					..
+				} => Error::CoerceTo {
+					from,
+					into: format!("set<{kind}, {len}>"),
+				},
+				e => e,
+			})
+			.and_then(|v| match v.len() {
+				v if v > *len as usize => Err(Error::LengthInvalid {
+					kind: format!("set<{kind}, {len}>"),
+					size: v,
+				}),
+				_ => Ok(v),
+			})
+	}
+
+	// -----------------------------------
+	// Advanced type conversion of values
+	// -----------------------------------
+
+	/// Try to convert this value to the specified `Kind`
+	pub(crate) fn convert_to(self, kind: &Kind) -> Result<Value, Error> {
+		// Attempt to convert to the desired type
+		let res = match kind {
+			Kind::Any => Ok(self),
+			Kind::Null => self.convert_to_null(),
+			Kind::Bool => self.convert_to_bool().map(Value::from),
+			Kind::Int => self.convert_to_int().map(Value::from),
+			Kind::Float => self.convert_to_float().map(Value::from),
+			Kind::Decimal => self.convert_to_decimal().map(Value::from),
+			Kind::Number => self.convert_to_number().map(Value::from),
+			Kind::String => self.convert_to_strand().map(Value::from),
+			Kind::Datetime => self.convert_to_datetime().map(Value::from),
+			Kind::Duration => self.convert_to_duration().map(Value::from),
+			Kind::Object => self.convert_to_object().map(Value::from),
+			Kind::Point => self.convert_to_point().map(Value::from),
+			Kind::Bytes => self.convert_to_bytes().map(Value::from),
+			Kind::Uuid => self.convert_to_uuid().map(Value::from),
+			Kind::Set(t, l) => match l {
+				Some(l) => self.convert_to_set_type_len(t, l).map(Value::from),
+				None => self.convert_to_set_type(t).map(Value::from),
+			},
+			Kind::Array(t, l) => match l {
+				Some(l) => self.convert_to_array_type_len(t, l).map(Value::from),
+				None => self.convert_to_array_type(t).map(Value::from),
+			},
+			Kind::Record(t) => match t.is_empty() {
+				true => self.convert_to_record().map(Value::from),
+				false => self.convert_to_record_type(t).map(Value::from),
+			},
+			Kind::Geometry(t) => match t.is_empty() {
+				true => self.convert_to_geometry().map(Value::from),
+				false => self.convert_to_geometry_type(t).map(Value::from),
+			},
+			Kind::Option(k) => match self {
+				Self::None => Ok(Self::None),
+				v => v.convert_to(k),
+			},
+			Kind::Either(k) => {
+				let mut val = self;
+				for k in k {
+					match val.convert_to(k) {
+						Err(Error::ConvertTo {
+							from,
+							..
+						}) => val = from,
+						Err(e) => return Err(e),
+						Ok(v) => return Ok(v),
+					}
+				}
+				Err(Error::ConvertTo {
+					from: val,
+					into: kind.to_string(),
+				})
+			}
+		};
+		// Check for any conversion errors
+		match res {
+			// There was a conversion error
+			Err(Error::ConvertTo {
+				from,
+				..
+			}) => Err(Error::ConvertTo {
+				from,
+				into: kind.to_string(),
+			}),
+			// There was a different error
+			Err(e) => Err(e),
+			// Everything converted ok
+			Ok(v) => Ok(v),
+		}
+	}
+
+	/// Try to convert this value to a `null`
+	pub(crate) fn convert_to_null(self) -> Result<Value, Error> {
+		match self {
+			// Allow any boolean value
+			Value::Null => Ok(Value::Null),
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "null".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to a `bool`
+	pub(crate) fn convert_to_bool(self) -> Result<bool, Error> {
+		match self {
+			// Allow any boolean value
+			Value::Bool(v) => Ok(v),
+			// Attempt to convert a string value
+			Value::Strand(ref v) => match v.parse::<bool>() {
+				// The string can be represented as a Float
+				Ok(v) => Ok(v),
+				// Ths string is not a float
+				_ => Err(Error::ConvertTo {
+					from: self,
+					into: "bool".into(),
+				}),
+			},
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "bool".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to an integer `Number`
+	pub(crate) fn convert_to_int(self) -> Result<Number, Error> {
+		match self {
+			// Allow any int number
+			Value::Number(v) if v.is_int() => Ok(v),
+			// Attempt to convert an float number
+			Value::Number(Number::Float(v)) if v.fract() == 0.0 => Ok(Number::Int(v as i64)),
+			// Attempt to convert a decimal number
+			Value::Number(Number::Decimal(v)) if v.is_integer() => match v.try_into() {
+				// The Decimal can be represented as an Int
+				Ok(v) => Ok(Number::Int(v)),
+				// The Decimal is out of bounds
+				_ => Err(Error::ConvertTo {
+					from: self,
+					into: "int".into(),
+				}),
+			},
+			// Attempt to convert a string value
+			Value::Strand(ref v) => match v.parse::<i64>() {
+				// The string can be represented as a Float
+				Ok(v) => Ok(Number::Int(v)),
+				// Ths string is not a float
+				_ => Err(Error::ConvertTo {
+					from: self,
+					into: "int".into(),
+				}),
+			},
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "int".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to a float `Number`
+	pub(crate) fn convert_to_float(self) -> Result<Number, Error> {
+		match self {
+			// Allow any float number
+			Value::Number(v) if v.is_float() => Ok(v),
+			// Attempt to convert an int number
+			Value::Number(Number::Int(v)) => Ok(Number::Float(v as f64)),
+			// Attempt to convert a decimal number
+			Value::Number(Number::Decimal(v)) => match v.try_into() {
+				// The Decimal can be represented as a Float
+				Ok(v) => Ok(Number::Float(v)),
+				// The Decimal loses precision
+				_ => Err(Error::ConvertTo {
+					from: self,
+					into: "float".into(),
+				}),
+			},
+			// Attempt to convert a string value
+			Value::Strand(ref v) => match v.parse::<f64>() {
+				// The string can be represented as a Float
+				Ok(v) => Ok(Number::Float(v)),
+				// Ths string is not a float
+				_ => Err(Error::ConvertTo {
+					from: self,
+					into: "float".into(),
+				}),
+			},
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "float".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to a decimal `Number`
+	pub(crate) fn convert_to_decimal(self) -> Result<Number, Error> {
+		match self {
+			// Allow any decimal number
+			Value::Number(v) if v.is_decimal() => Ok(v),
+			// Attempt to convert an int number
+			Value::Number(Number::Int(ref v)) => match Decimal::try_from(*v) {
+				// The Int can be represented as a Decimal
+				Ok(v) => Ok(Number::Decimal(v)),
+				// Ths Int does not convert to a Decimal
+				_ => Err(Error::ConvertTo {
+					from: self,
+					into: "decimal".into(),
+				}),
+			},
+			// Attempt to convert an float number
+			Value::Number(Number::Float(ref v)) => match Decimal::try_from(*v) {
+				// The Float can be represented as a Decimal
+				Ok(v) => Ok(Number::Decimal(v)),
+				// Ths Float does not convert to a Decimal
+				_ => Err(Error::ConvertTo {
+					from: self,
+					into: "decimal".into(),
+				}),
+			},
+			// Attempt to convert a string value
+			Value::Strand(ref v) => match Decimal::from_str(v) {
+				// The string can be represented as a Decimal
+				Ok(v) => Ok(Number::Decimal(v)),
+				// Ths string is not a Decimal
+				_ => Err(Error::ConvertTo {
+					from: self,
+					into: "decimal".into(),
+				}),
+			},
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "decimal".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to a `Number`
+	pub(crate) fn convert_to_number(self) -> Result<Number, Error> {
+		match self {
+			// Allow any number
+			Value::Number(v) => Ok(v),
+			// Attempt to convert a string value
+			Value::Strand(ref v) => match Number::from_str(v) {
+				// The string can be represented as a Float
+				Ok(v) => Ok(v),
+				// Ths string is not a float
+				_ => Err(Error::ConvertTo {
+					from: self,
+					into: "number".into(),
+				}),
+			},
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "number".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to a `String`
+	pub(crate) fn convert_to_string(self) -> Result<String, Error> {
+		match self {
+			// Bytes can't convert to strings
+			Value::Bytes(_) => Err(Error::ConvertTo {
+				from: self,
+				into: "string".into(),
+			}),
+			// None can't convert to a string
+			Value::None => Err(Error::ConvertTo {
+				from: self,
+				into: "string".into(),
+			}),
+			// Null can't convert to a string
+			Value::Null => Err(Error::ConvertTo {
+				from: self,
+				into: "string".into(),
+			}),
+			// Stringify anything else
+			_ => Ok(self.as_string()),
+		}
+	}
+
+	/// Try to convert this value to a `Strand`
+	pub(crate) fn convert_to_strand(self) -> Result<Strand, Error> {
+		match self {
+			// Bytes can't convert to strings
+			Value::Bytes(_) => Err(Error::ConvertTo {
+				from: self,
+				into: "string".into(),
+			}),
+			// None can't convert to a string
+			Value::None => Err(Error::ConvertTo {
+				from: self,
+				into: "string".into(),
+			}),
+			// Null can't convert to a string
+			Value::Null => Err(Error::ConvertTo {
+				from: self,
+				into: "string".into(),
+			}),
+			// Allow any string value
+			Value::Strand(v) => Ok(v),
+			// Stringify anything else
+			Value::Uuid(v) => Ok(v.to_raw().into()),
+			// Stringify anything else
+			Value::Datetime(v) => Ok(v.to_raw().into()),
+			// Stringify anything else
+			_ => Ok(self.to_string().into()),
+		}
+	}
+
+	/// Try to convert this value to a `Uuid`
+	pub(crate) fn convert_to_uuid(self) -> Result<Uuid, Error> {
+		match self {
+			// Uuids are allowed
+			Value::Uuid(v) => Ok(v),
+			// Attempt to parse a string
+			Value::Strand(ref v) => match Uuid::try_from(v.as_str()) {
+				// The string can be represented as a uuid
+				Ok(v) => Ok(v),
+				// Ths string is not a uuid
+				Err(_) => Err(Error::ConvertTo {
+					from: self,
+					into: "uuid".into(),
+				}),
+			},
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "uuid".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to a `Datetime`
+	pub(crate) fn convert_to_datetime(self) -> Result<Datetime, Error> {
+		match self {
+			// Datetimes are allowed
+			Value::Datetime(v) => Ok(v),
+			// Attempt to parse a string
+			Value::Strand(ref v) => match Datetime::try_from(v.as_str()) {
+				// The string can be represented as a datetime
+				Ok(v) => Ok(v),
+				// Ths string is not a datetime
+				Err(_) => Err(Error::ConvertTo {
+					from: self,
+					into: "datetime".into(),
+				}),
+			},
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "datetime".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to a `Duration`
+	pub(crate) fn convert_to_duration(self) -> Result<Duration, Error> {
+		match self {
+			// Durations are allowed
+			Value::Duration(v) => Ok(v),
+			// Attempt to parse a string
+			Value::Strand(ref v) => match Duration::try_from(v.as_str()) {
+				// The string can be represented as a duration
+				Ok(v) => Ok(v),
+				// Ths string is not a duration
+				Err(_) => Err(Error::ConvertTo {
+					from: self,
+					into: "duration".into(),
+				}),
+			},
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "duration".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to a `Bytes`
+	pub(crate) fn convert_to_bytes(self) -> Result<Bytes, Error> {
+		match self {
+			// Bytes are allowed
+			Value::Bytes(v) => Ok(v),
+			// Strings can be converted to bytes
+			Value::Strand(s) => Ok(Bytes(s.0.into_bytes())),
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "bytes".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to an `Object`
+	pub(crate) fn convert_to_object(self) -> Result<Object, Error> {
+		match self {
+			// Objects are allowed
+			Value::Object(v) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "object".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to an `Array`
+	pub(crate) fn convert_to_array(self) -> Result<Array, Error> {
+		match self {
+			// Arrays are allowed
+			Value::Array(v) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "array".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to an `Geometry` point
+	pub(crate) fn convert_to_point(self) -> Result<Geometry, Error> {
+		match self {
+			// Geometry points are allowed
+			Value::Geometry(Geometry::Point(v)) => Ok(v.into()),
+			// An array of two floats are allowed
+			Value::Array(ref v) if v.len() == 2 => match v.as_slice() {
+				// The array can be represented as a point
+				[Value::Number(v), Value::Number(w)] => Ok((v.to_float(), w.to_float()).into()),
+				// The array is not a geometry point
+				_ => Err(Error::ConvertTo {
+					from: self,
+					into: "point".into(),
+				}),
+			},
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "point".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to a Record or `Thing`
+	pub(crate) fn convert_to_record(self) -> Result<Thing, Error> {
+		match self {
+			// Records are allowed
+			Value::Thing(v) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "record".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to an `Geometry` type
+	pub(crate) fn convert_to_geometry(self) -> Result<Geometry, Error> {
+		match self {
+			// Geometries are allowed
+			Value::Geometry(v) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "geometry".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to a Record of a certain type
+	pub(crate) fn convert_to_record_type(self, val: &[Table]) -> Result<Thing, Error> {
+		match self {
+			// Records are allowed if correct type
+			Value::Thing(v) if self.is_record_type(val) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "record".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to a `Geometry` of a certain type
+	pub(crate) fn convert_to_geometry_type(self, val: &[String]) -> Result<Geometry, Error> {
+		match self {
+			// Geometries are allowed if correct type
+			Value::Geometry(v) if self.is_geometry_type(val) => Ok(v),
+			// Anything else raises an error
+			_ => Err(Error::ConvertTo {
+				from: self,
+				into: "geometry".into(),
+			}),
+		}
+	}
+
+	/// Try to convert this value to ab `Array` of a certain type
+	pub(crate) fn convert_to_array_type(self, kind: &Kind) -> Result<Array, Error> {
+		self.convert_to_array()?
+			.into_iter()
+			.map(|value| value.convert_to(kind))
+			.collect::<Result<Array, Error>>()
+			.map_err(|e| match e {
+				Error::ConvertTo {
+					from,
+					..
+				} => Error::ConvertTo {
+					from,
+					into: format!("array<{kind}>"),
+				},
+				e => e,
+			})
+	}
+
+	/// Try to convert this value to ab `Array` of a certain type and length
+	pub(crate) fn convert_to_array_type_len(self, kind: &Kind, len: &u64) -> Result<Array, Error> {
+		self.convert_to_array()?
+			.into_iter()
+			.map(|value| value.convert_to(kind))
+			.collect::<Result<Array, Error>>()
+			.map_err(|e| match e {
+				Error::ConvertTo {
+					from,
+					..
+				} => Error::ConvertTo {
+					from,
+					into: format!("array<{kind}, {len}>"),
+				},
+				e => e,
+			})
+			.and_then(|v| match v.len() {
+				v if v > *len as usize => Err(Error::LengthInvalid {
+					kind: format!("array<{kind}, {len}>"),
+					size: v,
+				}),
+				_ => Ok(v),
+			})
+	}
+
+	/// Try to convert this value to an `Array` of a certain type, unique values
+	pub(crate) fn convert_to_set_type(self, kind: &Kind) -> Result<Array, Error> {
+		self.convert_to_array()?
+			.uniq()
+			.into_iter()
+			.map(|value| value.convert_to(kind))
+			.collect::<Result<Array, Error>>()
+			.map_err(|e| match e {
+				Error::ConvertTo {
+					from,
+					..
+				} => Error::ConvertTo {
+					from,
+					into: format!("set<{kind}>"),
+				},
+				e => e,
+			})
+	}
+
+	/// Try to convert this value to an `Array` of a certain type, unique values, and length
+	pub(crate) fn convert_to_set_type_len(self, kind: &Kind, len: &u64) -> Result<Array, Error> {
+		self.convert_to_array()?
+			.uniq()
+			.into_iter()
+			.map(|value| value.convert_to(kind))
+			.collect::<Result<Array, Error>>()
+			.map_err(|e| match e {
+				Error::ConvertTo {
+					from,
+					..
+				} => Error::ConvertTo {
+					from,
+					into: format!("set<{kind}, {len}>"),
+				},
+				e => e,
+			})
+			.and_then(|v| match v.len() {
+				v if v > *len as usize => Err(Error::LengthInvalid {
+					kind: format!("set<{kind}, {len}>"),
+					size: v,
+				}),
+				_ => Ok(v),
+			})
 	}
 
 	// -----------------------------------
@@ -837,17 +2266,21 @@ impl Value {
 	// -----------------------------------
 
 	/// Fetch the record id if there is one
-	pub fn rid(self) -> Option<Thing> {
+	pub fn record(self) -> Option<Thing> {
 		match self {
+			// This is an object so look for the id field
 			Value::Object(mut v) => match v.remove("id") {
 				Some(Value::Thing(v)) => Some(v),
 				_ => None,
 			},
+			// This is an array so take the first item
 			Value::Array(mut v) => match v.len() {
-				1 => v.remove(0).rid(),
+				1 => v.remove(0).record(),
 				_ => None,
 			},
+			// This is a record id already
 			Value::Thing(v) => Some(v),
+			// There is no valid record id
 			_ => None,
 		}
 	}
@@ -856,8 +2289,9 @@ impl Value {
 	// JSON Path conversion
 	// -----------------------------------
 
-	pub fn jsonpath(&self) -> Idiom {
-		self.to_strand()
+	/// Converts this Value into a JSONPatch path
+	pub(crate) fn jsonpath(&self) -> Idiom {
+		self.to_raw_string()
 			.as_str()
 			.trim_start_matches('/')
 			.split(&['.', '/'][..])
@@ -867,38 +2301,62 @@ impl Value {
 	}
 
 	// -----------------------------------
+	// JSON Path conversion
+	// -----------------------------------
+
+	/// Checks whether this value is a static value
+	pub(crate) fn is_static(&self) -> bool {
+		match self {
+			Value::None => true,
+			Value::Null => true,
+			Value::Bool(_) => true,
+			Value::Bytes(_) => true,
+			Value::Uuid(_) => true,
+			Value::Number(_) => true,
+			Value::Strand(_) => true,
+			Value::Duration(_) => true,
+			Value::Datetime(_) => true,
+			Value::Geometry(_) => true,
+			Value::Array(v) => v.iter().all(Value::is_static),
+			Value::Object(v) => v.values().all(Value::is_static),
+			Value::Constant(_) => true,
+			_ => false,
+		}
+	}
+
+	// -----------------------------------
 	// Value operations
 	// -----------------------------------
 
+	/// Check if this Value is equal to another Value
 	pub fn equal(&self, other: &Value) -> bool {
 		match self {
 			Value::None => other.is_none(),
 			Value::Null => other.is_null(),
-			Value::Void => other.is_void(),
-			Value::True => other.is_true(),
-			Value::False => other.is_false(),
-			Value::Thing(v) => match other {
-				Value::Thing(w) => v == w,
-				Value::Regex(w) => match w.regex() {
-					Some(ref r) => r.is_match(v.to_string().as_str()),
-					None => false,
-				},
-				_ => false,
-			},
-			Value::Regex(v) => match other {
-				Value::Regex(w) => v == w,
-				Value::Number(w) => match v.regex() {
-					Some(ref r) => r.is_match(w.to_string().as_str()),
-					None => false,
-				},
-				Value::Strand(w) => match v.regex() {
-					Some(ref r) => r.is_match(w.as_str()),
-					None => false,
-				},
+			Value::Bool(v) => match other {
+				Value::Bool(w) => v == w,
 				_ => false,
 			},
 			Value::Uuid(v) => match other {
 				Value::Uuid(w) => v == w,
+				Value::Regex(w) => w.regex().is_match(v.to_raw().as_str()),
+				_ => false,
+			},
+			Value::Thing(v) => match other {
+				Value::Thing(w) => v == w,
+				Value::Regex(w) => w.regex().is_match(v.to_raw().as_str()),
+				_ => false,
+			},
+			Value::Strand(v) => match other {
+				Value::Strand(w) => v == w,
+				Value::Regex(w) => w.regex().is_match(v.as_str()),
+				_ => false,
+			},
+			Value::Regex(v) => match other {
+				Value::Regex(w) => v == w,
+				Value::Uuid(w) => v.regex().is_match(w.to_raw().as_str()),
+				Value::Thing(w) => v.regex().is_match(w.to_raw().as_str()),
+				Value::Strand(w) => v.regex().is_match(w.as_str()),
 				_ => false,
 			},
 			Value::Array(v) => match other {
@@ -909,21 +2367,8 @@ impl Value {
 				Value::Object(w) => v == w,
 				_ => false,
 			},
-			Value::Strand(v) => match other {
-				Value::Strand(w) => v == w,
-				Value::Regex(w) => match w.regex() {
-					Some(ref r) => r.is_match(v.as_str()),
-					None => false,
-				},
-				_ => v == &other.to_strand(),
-			},
 			Value::Number(v) => match other {
 				Value::Number(w) => v == w,
-				Value::Strand(_) => v == &other.to_number(),
-				Value::Regex(w) => match w.regex() {
-					Some(ref r) => r.is_match(v.to_string().as_str()),
-					None => false,
-				},
 				_ => false,
 			},
 			Value::Geometry(v) => match other {
@@ -932,18 +2377,17 @@ impl Value {
 			},
 			Value::Duration(v) => match other {
 				Value::Duration(w) => v == w,
-				Value::Strand(_) => v == &other.to_duration(),
 				_ => false,
 			},
 			Value::Datetime(v) => match other {
 				Value::Datetime(w) => v == w,
-				Value::Strand(_) => v == &other.to_datetime(),
 				_ => false,
 			},
-			_ => unreachable!(),
+			_ => self == other,
 		}
 	}
 
+	/// Check if all Values in an Array are equal to another Value
 	pub fn all_equal(&self, other: &Value) -> bool {
 		match self {
 			Value::Array(v) => v.iter().all(|v| v.equal(other)),
@@ -951,6 +2395,7 @@ impl Value {
 		}
 	}
 
+	/// Check if any Values in an Array are equal to another Value
 	pub fn any_equal(&self, other: &Value) -> bool {
 		match self {
 			Value::Array(v) => v.iter().any(|v| v.equal(other)),
@@ -958,16 +2403,22 @@ impl Value {
 		}
 	}
 
+	/// Fuzzy check if this Value is equal to another Value
 	pub fn fuzzy(&self, other: &Value) -> bool {
 		match self {
+			Value::Uuid(v) => match other {
+				Value::Strand(w) => v.to_raw().as_str().fuzzy_match(w.as_str()),
+				_ => false,
+			},
 			Value::Strand(v) => match other {
-				Value::Strand(w) => MATCHER.fuzzy_match(v.as_str(), w.as_str()).is_some(),
-				_ => MATCHER.fuzzy_match(v.as_str(), other.to_string().as_str()).is_some(),
+				Value::Strand(w) => v.as_str().fuzzy_match(w.as_str()),
+				_ => false,
 			},
 			_ => self.equal(other),
 		}
 	}
 
+	/// Fuzzy check if all Values in an Array are equal to another Value
 	pub fn all_fuzzy(&self, other: &Value) -> bool {
 		match self {
 			Value::Array(v) => v.iter().all(|v| v.fuzzy(other)),
@@ -975,6 +2426,7 @@ impl Value {
 		}
 	}
 
+	/// Fuzzy check if any Values in an Array are equal to another Value
 	pub fn any_fuzzy(&self, other: &Value) -> bool {
 		match self {
 			Value::Array(v) => v.iter().any(|v| v.fuzzy(other)),
@@ -982,12 +2434,17 @@ impl Value {
 		}
 	}
 
+	/// Check if this Value contains another Value
 	pub fn contains(&self, other: &Value) -> bool {
 		match self {
 			Value::Array(v) => v.iter().any(|v| v.equal(other)),
+			Value::Uuid(v) => match other {
+				Value::Strand(w) => v.to_raw().contains(w.as_str()),
+				_ => false,
+			},
 			Value::Strand(v) => match other {
 				Value::Strand(w) => v.contains(w.as_str()),
-				_ => v.contains(&other.to_string().as_str()),
+				_ => false,
 			},
 			Value::Geometry(v) => match other {
 				Value::Geometry(w) => v.contains(w),
@@ -997,6 +2454,7 @@ impl Value {
 		}
 	}
 
+	/// Check if all Values in an Array contain another Value
 	pub fn contains_all(&self, other: &Value) -> bool {
 		match other {
 			Value::Array(v) => v.iter().all(|v| match self {
@@ -1008,6 +2466,7 @@ impl Value {
 		}
 	}
 
+	/// Check if any Values in an Array contain another Value
 	pub fn contains_any(&self, other: &Value) -> bool {
 		match other {
 			Value::Array(v) => v.iter().any(|v| match self {
@@ -1019,6 +2478,7 @@ impl Value {
 		}
 	}
 
+	/// Check if this Value intersects another Value
 	pub fn intersects(&self, other: &Value) -> bool {
 		match self {
 			Value::Geometry(v) => match other {
@@ -1033,23 +2493,26 @@ impl Value {
 	// Sorting operations
 	// -----------------------------------
 
+	/// Compare this Value to another Value lexicographically
 	pub fn lexical_cmp(&self, other: &Value) -> Option<Ordering> {
 		match (self, other) {
-			(Value::Strand(a), Value::Strand(b)) => Some(lexical_sort::lexical_cmp(a, b)),
+			(Value::Strand(a), Value::Strand(b)) => Some(lexicmp::lexical_cmp(a, b)),
 			_ => self.partial_cmp(other),
 		}
 	}
 
+	/// Compare this Value to another Value using natrual numerical comparison
 	pub fn natural_cmp(&self, other: &Value) -> Option<Ordering> {
 		match (self, other) {
-			(Value::Strand(a), Value::Strand(b)) => Some(lexical_sort::natural_cmp(a, b)),
+			(Value::Strand(a), Value::Strand(b)) => Some(lexicmp::natural_cmp(a, b)),
 			_ => self.partial_cmp(other),
 		}
 	}
 
+	/// Compare this Value to another Value lexicographically and using natrual numerical comparison
 	pub fn natural_lexical_cmp(&self, other: &Value) -> Option<Ordering> {
 		match (self, other) {
-			(Value::Strand(a), Value::Strand(b)) => Some(lexical_sort::natural_lexical_cmp(a, b)),
+			(Value::Strand(a), Value::Strand(b)) => Some(lexicmp::natural_lexical_cmp(a, b)),
 			_ => self.partial_cmp(other),
 		}
 	}
@@ -1057,66 +2520,84 @@ impl Value {
 
 impl fmt::Display for Value {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		let mut f = Pretty::from(f);
 		match self {
 			Value::None => write!(f, "NONE"),
-			Value::Void => write!(f, "VOID"),
 			Value::Null => write!(f, "NULL"),
-			Value::True => write!(f, "true"),
-			Value::False => write!(f, "false"),
-			Value::Number(v) => write!(f, "{}", v),
-			Value::Strand(v) => write!(f, "{}", v),
-			Value::Duration(v) => write!(f, "{}", v),
-			Value::Datetime(v) => write!(f, "{}", v),
-			Value::Uuid(v) => write!(f, "{}", v),
-			Value::Array(v) => write!(f, "{}", v),
-			Value::Object(v) => write!(f, "{}", v),
-			Value::Geometry(v) => write!(f, "{}", v),
-			Value::Param(v) => write!(f, "{}", v),
-			Value::Idiom(v) => write!(f, "{}", v),
-			Value::Table(v) => write!(f, "{}", v),
-			Value::Thing(v) => write!(f, "{}", v),
-			Value::Model(v) => write!(f, "{}", v),
-			Value::Regex(v) => write!(f, "{}", v),
-			Value::Edges(v) => write!(f, "{}", v),
-			Value::Function(v) => write!(f, "{}", v),
-			Value::Subquery(v) => write!(f, "{}", v),
-			Value::Expression(v) => write!(f, "{}", v),
+			Value::Array(v) => write!(f, "{v}"),
+			Value::Block(v) => write!(f, "{v}"),
+			Value::Bool(v) => write!(f, "{v}"),
+			Value::Bytes(v) => write!(f, "{v}"),
+			Value::Cast(v) => write!(f, "{v}"),
+			Value::Constant(v) => write!(f, "{v}"),
+			Value::Datetime(v) => write!(f, "{v}"),
+			Value::Duration(v) => write!(f, "{v}"),
+			Value::Edges(v) => write!(f, "{v}"),
+			Value::Expression(v) => write!(f, "{v}"),
+			Value::Function(v) => write!(f, "{v}"),
+			Value::MlModel(v) => write!(f, "{v}"),
+			Value::Future(v) => write!(f, "{v}"),
+			Value::Geometry(v) => write!(f, "{v}"),
+			Value::Idiom(v) => write!(f, "{v}"),
+			Value::Mock(v) => write!(f, "{v}"),
+			Value::Number(v) => write!(f, "{v}"),
+			Value::Object(v) => write!(f, "{v}"),
+			Value::Param(v) => write!(f, "{v}"),
+			Value::Range(v) => write!(f, "{v}"),
+			Value::Regex(v) => write!(f, "{v}"),
+			Value::Strand(v) => write!(f, "{v}"),
+			Value::Query(v) => write!(f, "{v}"),
+			Value::Subquery(v) => write!(f, "{v}"),
+			Value::Table(v) => write!(f, "{v}"),
+			Value::Thing(v) => write!(f, "{v}"),
+			Value::Uuid(v) => write!(f, "{v}"),
 		}
 	}
 }
 
 impl Value {
+	/// Check if we require a writeable transaction
 	pub(crate) fn writeable(&self) -> bool {
 		match self {
-			Value::Array(v) => v.iter().any(|v| v.writeable()),
+			Value::Block(v) => v.writeable(),
+			Value::Idiom(v) => v.writeable(),
+			Value::Array(v) => v.iter().any(Value::writeable),
 			Value::Object(v) => v.iter().any(|(_, v)| v.writeable()),
-			Value::Function(v) => v.args().iter().any(|v| v.writeable()),
+			Value::Function(v) => {
+				v.is_custom() || v.is_script() || v.args().iter().any(Value::writeable)
+			}
+			Value::MlModel(m) => m.parameters.writeable(),
 			Value::Subquery(v) => v.writeable(),
-			Value::Expression(v) => v.l.writeable() || v.r.writeable(),
+			Value::Expression(v) => v.writeable(),
 			_ => false,
 		}
 	}
-
-	#[cfg_attr(feature = "parallel", async_recursion)]
-	#[cfg_attr(not(feature = "parallel"), async_recursion(?Send))]
+	/// Process this type returning a computed simple Value
+	#[cfg_attr(not(target_arch = "wasm32"), async_recursion)]
+	#[cfg_attr(target_arch = "wasm32", async_recursion(?Send))]
 	pub(crate) async fn compute(
 		&self,
 		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
-		doc: Option<&'async_recursion Value>,
+		doc: Option<&'async_recursion CursorDoc<'_>>,
 	) -> Result<Value, Error> {
+		// Prevent infinite recursion due to casting, expressions, etc.
+		let opt = &opt.dive(1)?;
+
 		match self {
-			Value::None => Ok(Value::None),
-			Value::Void => Ok(Value::Void),
-			Value::Null => Ok(Value::Null),
-			Value::True => Ok(Value::True),
-			Value::False => Ok(Value::False),
+			Value::Cast(v) => v.compute(ctx, opt, txn, doc).await,
+			Value::Thing(v) => v.compute(ctx, opt, txn, doc).await,
+			Value::Block(v) => v.compute(ctx, opt, txn, doc).await,
+			Value::Range(v) => v.compute(ctx, opt, txn, doc).await,
 			Value::Param(v) => v.compute(ctx, opt, txn, doc).await,
 			Value::Idiom(v) => v.compute(ctx, opt, txn, doc).await,
 			Value::Array(v) => v.compute(ctx, opt, txn, doc).await,
 			Value::Object(v) => v.compute(ctx, opt, txn, doc).await,
+			Value::Future(v) => v.compute(ctx, opt, txn, doc).await,
+			Value::Constant(v) => v.compute(ctx, opt, txn, doc).await,
 			Value::Function(v) => v.compute(ctx, opt, txn, doc).await,
+			Value::MlModel(v) => v.compute(ctx, opt, txn, doc).await,
 			Value::Subquery(v) => v.compute(ctx, opt, txn, doc).await,
 			Value::Expression(v) => v.compute(ctx, opt, txn, doc).await,
 			_ => Ok(self.to_owned()),
@@ -1124,192 +2605,316 @@ impl Value {
 	}
 }
 
-impl Serialize for Value {
-	fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
-	where
-		S: serde::Serializer,
-	{
-		if is_internal_serialization() {
-			match self {
-				Value::None => s.serialize_unit_variant("Value", 0, "None"),
-				Value::Void => s.serialize_unit_variant("Value", 1, "Void"),
-				Value::Null => s.serialize_unit_variant("Value", 2, "Null"),
-				Value::False => s.serialize_unit_variant("Value", 3, "False"),
-				Value::True => s.serialize_unit_variant("Value", 4, "True"),
-				Value::Number(v) => s.serialize_newtype_variant("Value", 5, "Number", v),
-				Value::Strand(v) => s.serialize_newtype_variant("Value", 6, "Strand", v),
-				Value::Duration(v) => s.serialize_newtype_variant("Value", 7, "Duration", v),
-				Value::Datetime(v) => s.serialize_newtype_variant("Value", 8, "Datetime", v),
-				Value::Uuid(v) => s.serialize_newtype_variant("Value", 9, "Uuid", v),
-				Value::Array(v) => s.serialize_newtype_variant("Value", 10, "Array", v),
-				Value::Object(v) => s.serialize_newtype_variant("Value", 11, "Object", v),
-				Value::Geometry(v) => s.serialize_newtype_variant("Value", 12, "Geometry", v),
-				Value::Param(v) => s.serialize_newtype_variant("Value", 13, "Param", v),
-				Value::Idiom(v) => s.serialize_newtype_variant("Value", 14, "Idiom", v),
-				Value::Table(v) => s.serialize_newtype_variant("Value", 15, "Table", v),
-				Value::Thing(v) => s.serialize_newtype_variant("Value", 16, "Thing", v),
-				Value::Model(v) => s.serialize_newtype_variant("Value", 17, "Model", v),
-				Value::Regex(v) => s.serialize_newtype_variant("Value", 18, "Regex", v),
-				Value::Edges(v) => s.serialize_newtype_variant("Value", 19, "Edges", v),
-				Value::Function(v) => s.serialize_newtype_variant("Value", 20, "Function", v),
-				Value::Subquery(v) => s.serialize_newtype_variant("Value", 21, "Subquery", v),
-				Value::Expression(v) => s.serialize_newtype_variant("Value", 22, "Expression", v),
-			}
-		} else {
-			match self {
-				Value::None => s.serialize_none(),
-				Value::Void => s.serialize_none(),
-				Value::Null => s.serialize_none(),
-				Value::True => s.serialize_bool(true),
-				Value::False => s.serialize_bool(false),
-				Value::Thing(v) => s.serialize_some(v),
-				Value::Uuid(v) => s.serialize_some(v),
-				Value::Array(v) => s.serialize_some(v),
-				Value::Object(v) => s.serialize_some(v),
-				Value::Number(v) => s.serialize_some(v),
-				Value::Strand(v) => s.serialize_some(v),
-				Value::Geometry(v) => s.serialize_some(v),
-				Value::Duration(v) => s.serialize_some(v),
-				Value::Datetime(v) => s.serialize_some(v),
-				_ => s.serialize_none(),
-			}
-		}
-	}
+// ------------------------------
+
+pub(crate) trait TryAdd<Rhs = Self> {
+	type Output;
+	fn try_add(self, rhs: Rhs) -> Result<Self::Output, Error>;
 }
 
-impl ops::Add for Value {
+impl TryAdd for Value {
 	type Output = Self;
-	fn add(self, other: Self) -> Self {
-		match (self, other) {
-			(Value::Number(v), Value::Number(w)) => Value::Number(v + w),
-			(Value::Strand(v), Value::Strand(w)) => Value::Strand(v + w),
-			(Value::Datetime(v), Value::Duration(w)) => Value::Datetime(w + v),
-			(Value::Duration(v), Value::Datetime(w)) => Value::Datetime(v + w),
-			(Value::Duration(v), Value::Duration(w)) => Value::Duration(v + w),
-			(v, w) => Value::from(v.as_number() + w.as_number()),
-		}
+	fn try_add(self, other: Self) -> Result<Self, Error> {
+		Ok(match (self, other) {
+			(Self::Number(v), Self::Number(w)) => Self::Number(v.try_add(w)?),
+			(Self::Strand(v), Self::Strand(w)) => Self::Strand(v + w),
+			(Self::Datetime(v), Self::Duration(w)) => Self::Datetime(w + v),
+			(Self::Duration(v), Self::Datetime(w)) => Self::Datetime(v + w),
+			(Self::Duration(v), Self::Duration(w)) => Self::Duration(v + w),
+			(v, w) => return Err(Error::TryAdd(v.to_raw_string(), w.to_raw_string())),
+		})
 	}
 }
 
-impl ops::Sub for Value {
+// ------------------------------
+
+pub(crate) trait TrySub<Rhs = Self> {
+	type Output;
+	fn try_sub(self, v: Self) -> Result<Self::Output, Error>;
+}
+
+impl TrySub for Value {
 	type Output = Self;
-	fn sub(self, other: Self) -> Self {
-		match (self, other) {
-			(Value::Number(v), Value::Number(w)) => Value::Number(v - w),
-			(Value::Datetime(v), Value::Duration(w)) => Value::Datetime(w - v),
-			(Value::Duration(v), Value::Datetime(w)) => Value::Datetime(v - w),
-			(Value::Duration(v), Value::Duration(w)) => Value::Duration(v - w),
-			(v, w) => Value::from(v.as_number() - w.as_number()),
-		}
+	fn try_sub(self, other: Self) -> Result<Self, Error> {
+		Ok(match (self, other) {
+			(Self::Number(v), Self::Number(w)) => Self::Number(v.try_sub(w)?),
+			(Self::Datetime(v), Self::Datetime(w)) => Self::Duration(v - w),
+			(Self::Datetime(v), Self::Duration(w)) => Self::Datetime(w - v),
+			(Self::Duration(v), Self::Datetime(w)) => Self::Datetime(v - w),
+			(Self::Duration(v), Self::Duration(w)) => Self::Duration(v - w),
+			(v, w) => return Err(Error::TrySub(v.to_raw_string(), w.to_raw_string())),
+		})
 	}
 }
 
-impl ops::Mul for Value {
+// ------------------------------
+
+pub(crate) trait TryMul<Rhs = Self> {
+	type Output;
+	fn try_mul(self, v: Self) -> Result<Self::Output, Error>;
+}
+
+impl TryMul for Value {
 	type Output = Self;
-	fn mul(self, other: Self) -> Self {
-		match (self, other) {
-			(Value::Number(v), Value::Number(w)) => Value::Number(v * w),
-			(v, w) => Value::from(v.as_number() * w.as_number()),
-		}
+	fn try_mul(self, other: Self) -> Result<Self, Error> {
+		Ok(match (self, other) {
+			(Self::Number(v), Self::Number(w)) => Self::Number(v.try_mul(w)?),
+			(v, w) => return Err(Error::TryMul(v.to_raw_string(), w.to_raw_string())),
+		})
 	}
 }
 
-impl ops::Div for Value {
+// ------------------------------
+
+pub(crate) trait TryDiv<Rhs = Self> {
+	type Output;
+	fn try_div(self, v: Self) -> Result<Self::Output, Error>;
+}
+
+impl TryDiv for Value {
 	type Output = Self;
-	fn div(self, other: Self) -> Self {
-		match (self, other) {
-			(Value::Number(v), Value::Number(w)) => Value::Number(v / w),
-			(Value::Datetime(v), Value::Duration(w)) => Value::Datetime(w / v),
-			(v, w) => Value::from(v.as_number() / w.as_number()),
-		}
+	fn try_div(self, other: Self) -> Result<Self, Error> {
+		Ok(match (self, other) {
+			(Self::Number(v), Self::Number(w)) => Self::Number(v.try_div(w)?),
+			(v, w) => return Err(Error::TryDiv(v.to_raw_string(), w.to_raw_string())),
+		})
 	}
 }
 
+// ------------------------------
+
+pub(crate) trait TryPow<Rhs = Self> {
+	type Output;
+	fn try_pow(self, v: Self) -> Result<Self::Output, Error>;
+}
+
+impl TryPow for Value {
+	type Output = Self;
+	fn try_pow(self, other: Self) -> Result<Self, Error> {
+		Ok(match (self, other) {
+			(Value::Number(v), Value::Number(w)) => Self::Number(v.try_pow(w)?),
+			(v, w) => return Err(Error::TryPow(v.to_raw_string(), w.to_raw_string())),
+		})
+	}
+}
+
+// ------------------------------
+
+pub(crate) trait TryNeg<Rhs = Self> {
+	type Output;
+	fn try_neg(self) -> Result<Self::Output, Error>;
+}
+
+impl TryNeg for Value {
+	type Output = Self;
+	fn try_neg(self) -> Result<Self, Error> {
+		Ok(match self {
+			Self::Number(n) => Self::Number(n.try_neg()?),
+			v => return Err(Error::TryNeg(v.to_string())),
+		})
+	}
+}
+
+/// Parse any `Value` including expressions
 pub fn value(i: &str) -> IResult<&str, Value> {
-	alt((double, single))(i)
+	let (i, start) = single(i)?;
+	if let (i, Some(o)) = opt(operator::binary)(i)? {
+		let _diving = crate::sql::parser::depth::dive(i)?;
+		let (i, r) = cut(value)(i)?;
+		let expr = match r {
+			Value::Expression(r) => r.augment(start, o),
+			_ => Expression::new(start, o, r),
+		};
+		let v = Value::from(expr);
+		Ok((i, v))
+	} else {
+		Ok((i, start))
+	}
 }
 
-pub fn double(i: &str) -> IResult<&str, Value> {
-	map(expression, Value::from)(i)
-}
-
+/// Parse any `Value` excluding binary expressions
 pub fn single(i: &str) -> IResult<&str, Value> {
-	alt((
-		map(tag_no_case("NONE"), |_| Value::None),
-		map(tag_no_case("VOID"), |_| Value::Void),
-		map(tag_no_case("NULL"), |_| Value::Null),
-		map(tag_no_case("true"), |_| Value::True),
-		map(tag_no_case("false"), |_| Value::False),
-		map(subquery, Value::from),
-		map(function, Value::from),
-		map(datetime, Value::from),
-		map(duration, Value::from),
-		map(geometry, Value::from),
-		map(unique, Value::from),
-		map(number, Value::from),
-		map(object, Value::from),
-		map(array, Value::from),
-		map(param, Value::from),
-		map(regex, Value::from),
-		map(model, Value::from),
-		map(idiom, Value::from),
-		map(thing, Value::from),
-		map(strand, Value::from),
-	))(i)
+	// Dive in `single` (as opposed to `value`) since it is directly
+	// called by `Cast`
+	let _diving = crate::sql::parser::depth::dive(i)?;
+	let (i, v) = alt((
+		alt((
+			terminated(
+				alt((
+					combinator::value(Value::None, tag_no_case("NONE")),
+					combinator::value(Value::Null, tag_no_case("NULL")),
+					combinator::value(Value::Bool(true), tag_no_case("true")),
+					combinator::value(Value::Bool(false), tag_no_case("false")),
+				)),
+				keyword,
+			),
+			into(idiom::multi_without_start),
+		)),
+		alt((
+			into(future),
+			into(cast),
+			path_like,
+			into(geometry),
+			into(subquery),
+			into(datetime),
+			into(duration),
+			into(unique),
+			into(number),
+			into(unary),
+			into(object),
+			into(array),
+		)),
+		alt((
+			into(block),
+			into(param),
+			into(regex),
+			into(mock),
+			into(edges),
+			into(range),
+			into(thing),
+			into(strand),
+			into(idiom::path),
+		)),
+	))(i)?;
+	reparse_idiom_start(v, i)
+}
+
+pub fn select_start(i: &str) -> IResult<&str, Value> {
+	let (i, v) = alt((
+		alt((
+			into(unary),
+			combinator::value(Value::None, tag_no_case("NONE")),
+			combinator::value(Value::Null, tag_no_case("NULL")),
+			combinator::value(Value::Bool(true), tag_no_case("true")),
+			combinator::value(Value::Bool(false), tag_no_case("false")),
+			into(idiom::multi_without_start),
+		)),
+		alt((
+			into(future),
+			into(cast),
+			path_like,
+			into(geometry),
+			into(subquery),
+			into(datetime),
+			into(duration),
+			into(unique),
+			into(number),
+			into(object),
+			into(array),
+			into(block),
+			into(param),
+			into(regex),
+			into(mock),
+			into(edges),
+			into(range),
+			into(thing),
+			into(table),
+			into(strand),
+		)),
+	))(i)?;
+	reparse_idiom_start(v, i)
+}
+
+/// A path like production: Constants, predefined functions, user defined functions and ml models.
+pub fn path_like(i: &str) -> IResult<&str, Value> {
+	alt((into(defined_function), into(model), |i| {
+		let (i, v) = builtin_name(i)?;
+		match v {
+			builtin::BuiltinName::Constant(x) => Ok((i, x.into())),
+			builtin::BuiltinName::Function(name) => {
+				builtin_function(name, i).map(|(i, v)| (i, v.into()))
+			}
+		}
+	}))(i)
 }
 
 pub fn select(i: &str) -> IResult<&str, Value> {
-	alt((
-		map(tag_no_case("NONE"), |_| Value::None),
-		map(tag_no_case("VOID"), |_| Value::Void),
-		map(tag_no_case("NULL"), |_| Value::Null),
-		map(tag_no_case("true"), |_| Value::True),
-		map(tag_no_case("false"), |_| Value::False),
-		map(subquery, Value::from),
-		map(function, Value::from),
-		map(datetime, Value::from),
-		map(duration, Value::from),
-		map(geometry, Value::from),
-		map(unique, Value::from),
-		map(number, Value::from),
-		map(object, Value::from),
-		map(array, Value::from),
-		map(param, Value::from),
-		map(regex, Value::from),
-		map(model, Value::from),
-		map(edges, Value::from),
-		map(thing, Value::from),
-		map(table, Value::from),
-		map(strand, Value::from),
-	))(i)
+	let _diving = crate::sql::parser::depth::dive(i)?;
+	let (i, start) = select_start(i)?;
+	if let (i, Some(op)) = opt(operator::binary)(i)? {
+		// In a binary expression single ident's arent tables but paths.
+		let start = match start {
+			Value::Table(Table(x)) => Value::Idiom(Idiom::from(x)),
+			x => x,
+		};
+		let (i, r) = cut(value)(i)?;
+		let expr = match r {
+			Value::Expression(r) => r.augment(start, op),
+			_ => Expression::new(start, op, r),
+		};
+		let v = Value::from(expr);
+		Ok((i, v))
+	} else {
+		Ok((i, start))
+	}
 }
 
+/// Used in CREATE, UPDATE, and DELETE clauses
 pub fn what(i: &str) -> IResult<&str, Value> {
-	alt((
-		map(subquery, Value::from),
-		map(function, Value::from),
-		map(param, Value::from),
-		map(model, Value::from),
-		map(edges, Value::from),
-		map(thing, Value::from),
-		map(table, Value::from),
-	))(i)
+	let _diving = crate::sql::parser::depth::dive(i)?;
+	let (i, v) = alt((
+		into(idiom::multi_without_start),
+		path_like,
+		into(subquery),
+		into(datetime),
+		into(duration),
+		into(future),
+		into(block),
+		into(param),
+		into(mock),
+		into(edges),
+		into(range),
+		into(thing),
+		into(table),
+	))(i)?;
+	reparse_idiom_start(v, i)
 }
 
+/// Used to parse any simple JSON-like value
 pub fn json(i: &str) -> IResult<&str, Value> {
+	let _diving = crate::sql::parser::depth::dive(i)?;
+	// Use a specific parser for JSON objects
+	fn object(i: &str) -> IResult<&str, Object> {
+		let (i, _) = char('{')(i)?;
+		let (i, _) = mightbespace(i)?;
+		let (i, v) = separated_list0(commas, |i| {
+			let (i, k) = key(i)?;
+			let (i, _) = mightbespace(i)?;
+			let (i, _) = char(':')(i)?;
+			let (i, _) = mightbespace(i)?;
+			let (i, v) = json(i)?;
+			Ok((i, (String::from(k), v)))
+		})(i)?;
+		let (i, _) = mightbespace(i)?;
+		let (i, _) = opt(char(','))(i)?;
+		let (i, _) = mightbespace(i)?;
+		let (i, _) = char('}')(i)?;
+		Ok((i, Object(v.into_iter().collect())))
+	}
+	// Use a specific parser for JSON arrays
+	fn array(i: &str) -> IResult<&str, Array> {
+		let (i, _) = char('[')(i)?;
+		let (i, _) = mightbespace(i)?;
+		let (i, v) = separated_list0(commas, json)(i)?;
+		let (i, _) = mightbespace(i)?;
+		let (i, _) = opt(char(','))(i)?;
+		let (i, _) = mightbespace(i)?;
+		let (i, _) = char(']')(i)?;
+		Ok((i, Array(v)))
+	}
+	// Parse any simple JSON-like value
 	alt((
-		map(tag_no_case("NULL"), |_| Value::Null),
-		map(tag_no_case("true"), |_| Value::True),
-		map(tag_no_case("false"), |_| Value::False),
-		map(datetime, Value::from),
-		map(duration, Value::from),
-		map(geometry, Value::from),
-		map(unique, Value::from),
-		map(number, Value::from),
-		map(object, Value::from),
-		map(array, Value::from),
-		map(thing, Value::from),
-		map(strand, Value::from),
+		combinator::value(Value::Null, tag_no_case("null".as_bytes())),
+		combinator::value(Value::Bool(true), tag_no_case("true".as_bytes())),
+		combinator::value(Value::Bool(false), tag_no_case("false".as_bytes())),
+		into(datetime),
+		into(geometry),
+		into(unique),
+		into(number),
+		into(object),
+		into(array),
+		into(thing),
+		into(strand),
 	))(i)
 }
 
@@ -1318,155 +2923,69 @@ mod tests {
 
 	use super::*;
 	use crate::sql::test::Parse;
+	use crate::sql::uuid::Uuid;
 
 	#[test]
 	fn check_none() {
-		assert_eq!(true, Value::None.is_none());
-		assert_eq!(true, Value::Void.is_none());
-		assert_eq!(true, Value::Null.is_none());
-		assert_eq!(false, Value::from(1).is_none());
-	}
-
-	#[test]
-	fn check_void() {
-		assert_eq!(true, Value::None.is_void());
-		assert_eq!(true, Value::Void.is_void());
-		assert_eq!(false, Value::Null.is_void());
-		assert_eq!(false, Value::from(1).is_void());
+		assert!(Value::None.is_none());
+		assert!(!Value::Null.is_none());
+		assert!(!Value::from(1).is_none());
 	}
 
 	#[test]
 	fn check_null() {
-		assert_eq!(true, Value::None.is_null());
-		assert_eq!(false, Value::Void.is_null());
-		assert_eq!(true, Value::Null.is_null());
-		assert_eq!(false, Value::from(1).is_null());
+		assert!(Value::Null.is_null());
+		assert!(!Value::None.is_null());
+		assert!(!Value::from(1).is_null());
 	}
 
 	#[test]
 	fn check_true() {
-		assert_eq!(false, Value::None.is_true());
-		assert_eq!(true, Value::True.is_true());
-		assert_eq!(false, Value::False.is_true());
-		assert_eq!(false, Value::from(1).is_true());
-		assert_eq!(true, Value::from("true").is_true());
-		assert_eq!(false, Value::from("false").is_true());
-		assert_eq!(false, Value::from("something").is_true());
+		assert!(!Value::None.is_true());
+		assert!(Value::Bool(true).is_true());
+		assert!(!Value::Bool(false).is_true());
+		assert!(!Value::from(1).is_true());
+		assert!(!Value::from("something").is_true());
 	}
 
 	#[test]
 	fn check_false() {
-		assert_eq!(false, Value::None.is_false());
-		assert_eq!(false, Value::True.is_false());
-		assert_eq!(true, Value::False.is_false());
-		assert_eq!(false, Value::from(1).is_false());
-		assert_eq!(false, Value::from("true").is_false());
-		assert_eq!(true, Value::from("false").is_false());
-		assert_eq!(false, Value::from("something").is_false());
+		assert!(!Value::None.is_false());
+		assert!(!Value::Bool(true).is_false());
+		assert!(Value::Bool(false).is_false());
+		assert!(!Value::from(1).is_false());
+		assert!(!Value::from("something").is_false());
 	}
 
 	#[test]
-	fn convert_bool() {
-		assert_eq!(false, Value::None.is_truthy());
-		assert_eq!(false, Value::Null.is_truthy());
-		assert_eq!(false, Value::Void.is_truthy());
-		assert_eq!(true, Value::True.is_truthy());
-		assert_eq!(false, Value::False.is_truthy());
-		assert_eq!(false, Value::from(0).is_truthy());
-		assert_eq!(true, Value::from(1).is_truthy());
-		assert_eq!(true, Value::from(-1).is_truthy());
-		assert_eq!(true, Value::from(1.1).is_truthy());
-		assert_eq!(true, Value::from(-1.1).is_truthy());
-		assert_eq!(true, Value::from("true").is_truthy());
-		assert_eq!(false, Value::from("false").is_truthy());
-		assert_eq!(true, Value::from("falsey").is_truthy());
-		assert_eq!(true, Value::from("something").is_truthy());
-	}
-
-	#[test]
-	fn convert_int() {
-		assert_eq!(0, Value::None.as_int());
-		assert_eq!(0, Value::Null.as_int());
-		assert_eq!(0, Value::Void.as_int());
-		assert_eq!(1, Value::True.as_int());
-		assert_eq!(0, Value::False.as_int());
-		assert_eq!(0, Value::from(0).as_int());
-		assert_eq!(1, Value::from(1).as_int());
-		assert_eq!(-1, Value::from(-1).as_int());
-		assert_eq!(1, Value::from(1.1).as_int());
-		assert_eq!(-1, Value::from(-1.1).as_int());
-		assert_eq!(3, Value::from("3").as_int());
-		assert_eq!(0, Value::from("true").as_int());
-		assert_eq!(0, Value::from("false").as_int());
-		assert_eq!(0, Value::from("something").as_int());
-	}
-
-	#[test]
-	fn convert_float() {
-		assert_eq!(0.0, Value::None.as_float());
-		assert_eq!(0.0, Value::Null.as_float());
-		assert_eq!(0.0, Value::Void.as_float());
-		assert_eq!(1.0, Value::True.as_float());
-		assert_eq!(0.0, Value::False.as_float());
-		assert_eq!(0.0, Value::from(0).as_float());
-		assert_eq!(1.0, Value::from(1).as_float());
-		assert_eq!(-1.0, Value::from(-1).as_float());
-		assert_eq!(1.1, Value::from(1.1).as_float());
-		assert_eq!(-1.1, Value::from(-1.1).as_float());
-		assert_eq!(3.0, Value::from("3").as_float());
-		assert_eq!(0.0, Value::from("true").as_float());
-		assert_eq!(0.0, Value::from("false").as_float());
-		assert_eq!(0.0, Value::from("something").as_float());
-	}
-
-	#[test]
-	fn convert_number() {
-		assert_eq!(Number::from(0), Value::None.as_number());
-		assert_eq!(Number::from(0), Value::Null.as_number());
-		assert_eq!(Number::from(0), Value::Void.as_number());
-		assert_eq!(Number::from(1), Value::True.as_number());
-		assert_eq!(Number::from(0), Value::False.as_number());
-		assert_eq!(Number::from(0), Value::from(0).as_number());
-		assert_eq!(Number::from(1), Value::from(1).as_number());
-		assert_eq!(Number::from(-1), Value::from(-1).as_number());
-		assert_eq!(Number::from(1.1), Value::from(1.1).as_number());
-		assert_eq!(Number::from(-1.1), Value::from(-1.1).as_number());
-		assert_eq!(Number::from(3), Value::from("3").as_number());
-		assert_eq!(Number::from(0), Value::from("true").as_number());
-		assert_eq!(Number::from(0), Value::from("false").as_number());
-		assert_eq!(Number::from(0), Value::from("something").as_number());
-	}
-
-	#[test]
-	fn convert_strand() {
-		assert_eq!(Strand::from("NONE"), Value::None.as_strand());
-		assert_eq!(Strand::from("NULL"), Value::Null.as_strand());
-		assert_eq!(Strand::from("VOID"), Value::Void.as_strand());
-		assert_eq!(Strand::from("true"), Value::True.as_strand());
-		assert_eq!(Strand::from("false"), Value::False.as_strand());
-		assert_eq!(Strand::from("0"), Value::from(0).as_strand());
-		assert_eq!(Strand::from("1"), Value::from(1).as_strand());
-		assert_eq!(Strand::from("-1"), Value::from(-1).as_strand());
-		assert_eq!(Strand::from("1.1"), Value::from(1.1).as_strand());
-		assert_eq!(Strand::from("-1.1"), Value::from(-1.1).as_strand());
-		assert_eq!(Strand::from("3"), Value::from("3").as_strand());
-		assert_eq!(Strand::from("true"), Value::from("true").as_strand());
-		assert_eq!(Strand::from("false"), Value::from("false").as_strand());
-		assert_eq!(Strand::from("something"), Value::from("something").as_strand());
+	fn convert_truthy() {
+		assert!(!Value::None.is_truthy());
+		assert!(!Value::Null.is_truthy());
+		assert!(Value::Bool(true).is_truthy());
+		assert!(!Value::Bool(false).is_truthy());
+		assert!(!Value::from(0).is_truthy());
+		assert!(Value::from(1).is_truthy());
+		assert!(Value::from(-1).is_truthy());
+		assert!(Value::from(1.1).is_truthy());
+		assert!(Value::from(-1.1).is_truthy());
+		assert!(Value::from("true").is_truthy());
+		assert!(!Value::from("false").is_truthy());
+		assert!(Value::from("falsey").is_truthy());
+		assert!(Value::from("something").is_truthy());
+		assert!(Value::from(Uuid::new()).is_truthy());
 	}
 
 	#[test]
 	fn convert_string() {
 		assert_eq!(String::from("NONE"), Value::None.as_string());
 		assert_eq!(String::from("NULL"), Value::Null.as_string());
-		assert_eq!(String::from("VOID"), Value::Void.as_string());
-		assert_eq!(String::from("true"), Value::True.as_string());
-		assert_eq!(String::from("false"), Value::False.as_string());
+		assert_eq!(String::from("true"), Value::Bool(true).as_string());
+		assert_eq!(String::from("false"), Value::Bool(false).as_string());
 		assert_eq!(String::from("0"), Value::from(0).as_string());
 		assert_eq!(String::from("1"), Value::from(1).as_string());
 		assert_eq!(String::from("-1"), Value::from(-1).as_string());
-		assert_eq!(String::from("1.1"), Value::from(1.1).as_string());
-		assert_eq!(String::from("-1.1"), Value::from(-1.1).as_string());
+		assert_eq!(String::from("1.1f"), Value::from(1.1).as_string());
+		assert_eq!(String::from("-1.1f"), Value::from(-1.1).as_string());
 		assert_eq!(String::from("3"), Value::from("3").as_string());
 		assert_eq!(String::from("true"), Value::from("true").as_string());
 		assert_eq!(String::from("false"), Value::from("false").as_string());
@@ -1476,8 +2995,9 @@ mod tests {
 	#[test]
 	fn check_size() {
 		assert_eq!(64, std::mem::size_of::<Value>());
-		assert_eq!(88, std::mem::size_of::<Result<Value, Error>>());
-		assert_eq!(48, std::mem::size_of::<crate::sql::number::Number>());
+		assert_eq!(104, std::mem::size_of::<Error>());
+		assert_eq!(104, std::mem::size_of::<Result<Value, Error>>());
+		assert_eq!(24, std::mem::size_of::<crate::sql::number::Number>());
 		assert_eq!(24, std::mem::size_of::<crate::sql::strand::Strand>());
 		assert_eq!(16, std::mem::size_of::<crate::sql::duration::Duration>());
 		assert_eq!(12, std::mem::size_of::<crate::sql::datetime::Datetime>());
@@ -1488,8 +3008,9 @@ mod tests {
 		assert_eq!(24, std::mem::size_of::<crate::sql::idiom::Idiom>());
 		assert_eq!(24, std::mem::size_of::<crate::sql::table::Table>());
 		assert_eq!(56, std::mem::size_of::<crate::sql::thing::Thing>());
-		assert_eq!(48, std::mem::size_of::<crate::sql::model::Model>());
-		assert_eq!(24, std::mem::size_of::<crate::sql::regex::Regex>());
+		assert_eq!(40, std::mem::size_of::<crate::sql::mock::Mock>());
+		assert_eq!(32, std::mem::size_of::<crate::sql::regex::Regex>());
+		assert_eq!(8, std::mem::size_of::<Box<crate::sql::range::Range>>());
 		assert_eq!(8, std::mem::size_of::<Box<crate::sql::edges::Edges>>());
 		assert_eq!(8, std::mem::size_of::<Box<crate::sql::function::Function>>());
 		assert_eq!(8, std::mem::size_of::<Box<crate::sql::subquery::Subquery>>());
@@ -1497,15 +3018,33 @@ mod tests {
 	}
 
 	#[test]
+	fn check_serialize() {
+		let enc: Vec<u8> = Value::None.try_into().unwrap();
+		assert_eq!(2, enc.len());
+		let enc: Vec<u8> = Value::Null.try_into().unwrap();
+		assert_eq!(2, enc.len());
+		let enc: Vec<u8> = Value::Bool(true).try_into().unwrap();
+		assert_eq!(3, enc.len());
+		let enc: Vec<u8> = Value::Bool(false).try_into().unwrap();
+		assert_eq!(3, enc.len());
+		let enc: Vec<u8> = Value::from("test").try_into().unwrap();
+		assert_eq!(8, enc.len());
+		let enc: Vec<u8> = Value::parse("{ hello: 'world' }").try_into().unwrap();
+		assert_eq!(19, enc.len());
+		let enc: Vec<u8> = Value::parse("{ compact: true, schema: 0 }").try_into().unwrap();
+		assert_eq!(27, enc.len());
+	}
+
+	#[test]
 	fn serialize_deserialize() {
 		let val = Value::parse(
-			"{ test: { something: [1, 'two', null, test:tobie, { something: false }] } }",
+			"{ test: { something: [1, 'two', null, test:tobie, { trueee: false, noneee: nulll }] } }",
 		);
 		let res = Value::parse(
-			"{ test: { something: [1, 'two', null, test:tobie, { something: false }] } }",
+			"{ test: { something: [1, 'two', null, test:tobie, { trueee: false, noneee: nulll }] } }",
 		);
-		let enc: Vec<u8> = val.into();
-		let dec: Value = enc.into();
+		let enc: Vec<u8> = val.try_into().unwrap();
+		let dec: Value = enc.try_into().unwrap();
 		assert_eq!(res, dec);
 	}
 }

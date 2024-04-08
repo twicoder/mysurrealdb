@@ -2,11 +2,14 @@ use crate::sql::comment::shouldbespace;
 use crate::sql::error::IResult;
 use crate::sql::value::{value, Value};
 use nom::bytes::complete::tag_no_case;
+use nom::combinator::cut;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::Deref;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub struct Cond(pub Value);
 
 impl Deref for Cond {
@@ -25,7 +28,7 @@ impl fmt::Display for Cond {
 pub fn cond(i: &str) -> IResult<&str, Cond> {
 	let (i, _) = tag_no_case("WHERE")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, v) = value(i)?;
+	let (i, v) = cut(value)(i)?;
 	Ok((i, Cond(v)))
 }
 
@@ -38,7 +41,6 @@ mod tests {
 	fn cond_statement() {
 		let sql = "WHERE field = true";
 		let res = cond(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("WHERE field = true", format!("{}", out));
 	}
@@ -47,7 +49,6 @@ mod tests {
 	fn cond_statement_multiple() {
 		let sql = "WHERE field = true AND other.field = false";
 		let res = cond(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("WHERE field = true AND other.field = false", format!("{}", out));
 	}

@@ -1,16 +1,20 @@
 use crate::sql::comment::shouldbespace;
 use crate::sql::common::commas;
 use crate::sql::error::IResult;
+use crate::sql::fmt::Fmt;
 use crate::sql::idiom::{basic, Idiom};
+use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
-use nom::combinator::opt;
+use nom::combinator::{cut, opt};
 use nom::multi::separated_list1;
-use nom::sequence::tuple;
+use nom::sequence::terminated;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::fmt::{self, Display, Formatter};
 use std::ops::Deref;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub struct Groups(pub Vec<Group>);
 
 impl Deref for Groups {
@@ -28,17 +32,18 @@ impl IntoIterator for Groups {
 	}
 }
 
-impl fmt::Display for Groups {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(
-			f,
-			"GROUP BY {}",
-			self.0.iter().map(|ref v| format!("{}", v)).collect::<Vec<_>>().join(", ")
-		)
+impl Display for Groups {
+	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+		if self.0.is_empty() {
+			write!(f, "GROUP ALL")
+		} else {
+			write!(f, "GROUP BY {}", Fmt::comma_separated(&self.0))
+		}
 	}
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub struct Group(pub Idiom);
 
 impl Deref for Group {
@@ -48,16 +53,25 @@ impl Deref for Group {
 	}
 }
 
-impl fmt::Display for Group {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "{}", self.0)
+impl Display for Group {
+	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+		Display::fmt(&self.0, f)
 	}
 }
 
 pub fn group(i: &str) -> IResult<&str, Groups> {
 	let (i, _) = tag_no_case("GROUP")(i)?;
-	let (i, _) = opt(tuple((shouldbespace, tag_no_case("BY"))))(i)?;
 	let (i, _) = shouldbespace(i)?;
+	cut(alt((group_all, group_any)))(i)
+}
+
+fn group_all(i: &str) -> IResult<&str, Groups> {
+	let (i, _) = tag_no_case("ALL")(i)?;
+	Ok((i, Groups(vec![])))
+}
+
+fn group_any(i: &str) -> IResult<&str, Groups> {
+	let (i, _) = opt(terminated(tag_no_case("BY"), shouldbespace))(i)?;
 	let (i, v) = separated_list1(commas, group_raw)(i)?;
 	Ok((i, Groups(v)))
 }
@@ -77,7 +91,6 @@ mod tests {
 	fn group_statement() {
 		let sql = "GROUP field";
 		let res = group(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(out, Groups(vec![Group(Idiom::parse("field"))]));
 		assert_eq!("GROUP BY field", format!("{}", out));
@@ -87,7 +100,6 @@ mod tests {
 	fn group_statement_by() {
 		let sql = "GROUP BY field";
 		let res = group(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(out, Groups(vec![Group(Idiom::parse("field"))]));
 		assert_eq!("GROUP BY field", format!("{}", out));
@@ -97,12 +109,19 @@ mod tests {
 	fn group_statement_multiple() {
 		let sql = "GROUP field, other.field";
 		let res = group(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(
 			out,
 			Groups(vec![Group(Idiom::parse("field")), Group(Idiom::parse("other.field"))])
 		);
 		assert_eq!("GROUP BY field, other.field", format!("{}", out));
+	}
+
+	#[test]
+	fn group_statement_all() {
+		let sql = "GROUP ALL";
+		let out = group(sql).unwrap().1;
+		assert_eq!(out, Groups(Vec::new()));
+		assert_eq!(sql, out.to_string());
 	}
 }

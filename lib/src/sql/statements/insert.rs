@@ -1,29 +1,36 @@
 use crate::ctx::Context;
-use crate::dbs::Iterable;
 use crate::dbs::Iterator;
-use crate::dbs::Level;
 use crate::dbs::Options;
 use crate::dbs::Statement;
-use crate::dbs::Transaction;
+use crate::dbs::{Iterable, Transaction};
+use crate::doc::CursorDoc;
 use crate::err::Error;
 use crate::sql::comment::shouldbespace;
 use crate::sql::data::{single, update, values, Data};
+use crate::sql::error::expected;
+use crate::sql::error::ExplainResultExt;
 use crate::sql::error::IResult;
 use crate::sql::output::{output, Output};
-use crate::sql::table::{table, Table};
+use crate::sql::param::param;
+use crate::sql::table::table;
 use crate::sql::timeout::{timeout, Timeout};
+use crate::sql::value::value;
 use crate::sql::value::Value;
 use derive::Store;
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
-use nom::combinator::opt;
+use nom::combinator::cut;
+use nom::combinator::{map, opt};
 use nom::sequence::preceded;
+use nom::sequence::terminated;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Store, Hash)]
+#[revisioned(revision = 1)]
 pub struct InsertStatement {
-	pub into: Table,
+	pub into: Value,
 	pub data: Data,
 	pub ignore: bool,
 	pub update: Option<Data>,
@@ -33,67 +40,75 @@ pub struct InsertStatement {
 }
 
 impl InsertStatement {
+	/// Check if we require a writeable transaction
 	pub(crate) fn writeable(&self) -> bool {
 		true
 	}
-
+	/// Process this type returning a computed simple Value
 	pub(crate) async fn compute(
 		&self,
 		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
-		doc: Option<&Value>,
+		doc: Option<&CursorDoc<'_>>,
 	) -> Result<Value, Error> {
-		// Allowed to run?
-		opt.check(Level::No)?;
+		// Valid options?
+		opt.valid_for_db()?;
 		// Create a new iterator
 		let mut i = Iterator::new();
 		// Ensure futures are stored
-		let opt = &opt.futures(false);
+		let opt = &opt.new_with_futures(false).with_projections(false);
 		// Parse the expression
-		match &self.data {
-			// Check if this is a traditional statement
-			Data::ValuesExpression(v) => {
-				for v in v {
-					// Create a new empty base object
-					let mut o = Value::base();
-					// Set each field from the expression
-					for (k, v) in v.iter() {
-						let v = v.compute(ctx, opt, txn, None).await?;
-						o.set(ctx, opt, txn, k, v).await?;
+		match self.into.compute(ctx, opt, txn, doc).await? {
+			Value::Table(into) => match &self.data {
+				// Check if this is a traditional statement
+				Data::ValuesExpression(v) => {
+					for v in v {
+						// Create a new empty base object
+						let mut o = Value::base();
+						// Set each field from the expression
+						for (k, v) in v.iter() {
+							let v = v.compute(ctx, opt, txn, None).await?;
+							o.set(ctx, opt, txn, k, v).await?;
+						}
+						// Specify the new table record id
+						let id = o.rid().generate(&into, true)?;
+						// Pass the mergeable to the iterator
+						i.ingest(Iterable::Mergeable(id, o));
 					}
-					// Specify the new table record id
-					let id = o.retable(&self.into)?;
-					// Pass the mergeable to the iterator
-					i.ingest(Iterable::Mergeable(id, o));
 				}
-			}
-			// Check if this is a modern statement
-			Data::SingleExpression(v) => {
-				let v = v.compute(ctx, opt, txn, doc).await?;
-				match v {
-					Value::Array(v) => {
-						for v in v {
+				// Check if this is a modern statement
+				Data::SingleExpression(v) => {
+					let v = v.compute(ctx, opt, txn, doc).await?;
+					match v {
+						Value::Array(v) => {
+							for v in v {
+								// Specify the new table record id
+								let id = v.rid().generate(&into, true)?;
+								// Pass the mergeable to the iterator
+								i.ingest(Iterable::Mergeable(id, v));
+							}
+						}
+						Value::Object(_) => {
 							// Specify the new table record id
-							let id = v.retable(&self.into)?;
+							let id = v.rid().generate(&into, true)?;
 							// Pass the mergeable to the iterator
 							i.ingest(Iterable::Mergeable(id, v));
 						}
-					}
-					Value::Object(_) => {
-						// Specify the new table record id
-						let id = v.retable(&self.into)?;
-						// Pass the mergeable to the iterator
-						i.ingest(Iterable::Mergeable(id, v));
-					}
-					v => {
-						return Err(Error::InsertStatement {
-							value: v.to_string(),
-						})
+						v => {
+							return Err(Error::InsertStatement {
+								value: v.to_string(),
+							})
+						}
 					}
 				}
+				_ => unreachable!(),
+			},
+			v => {
+				return Err(Error::InsertStatement {
+					value: v.to_string(),
+				})
 			}
-			_ => unreachable!(),
 		}
 		// Assign the statement
 		let stm = Statement::from(self);
@@ -104,19 +119,22 @@ impl InsertStatement {
 
 impl fmt::Display for InsertStatement {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "INSERT")?;
+		f.write_str("INSERT")?;
 		if self.ignore {
-			write!(f, " IGNORE")?
+			f.write_str(" IGNORE")?
 		}
 		write!(f, " INTO {} {}", self.into, self.data)?;
+		if let Some(ref v) = self.update {
+			write!(f, " {v}")?
+		}
 		if let Some(ref v) = self.output {
-			write!(f, " {}", v)?
+			write!(f, " {v}")?
 		}
 		if let Some(ref v) = self.timeout {
-			write!(f, " {}", v)?
+			write!(f, " {v}")?
 		}
 		if self.parallel {
-			write!(f, " PARALLEL")?
+			f.write_str(" PARALLEL")?
 		}
 		Ok(())
 	}
@@ -124,10 +142,19 @@ impl fmt::Display for InsertStatement {
 
 pub fn insert(i: &str) -> IResult<&str, InsertStatement> {
 	let (i, _) = tag_no_case("INSERT")(i)?;
-	let (i, ignore) = opt(preceded(shouldbespace, tag_no_case("IGNORE")))(i)?;
-	let (i, _) = preceded(shouldbespace, tag_no_case("INTO"))(i)?;
-	let (i, into) = preceded(shouldbespace, table)(i)?;
-	let (i, data) = preceded(shouldbespace, alt((values, single)))(i)?;
+	let (i, _) = shouldbespace(i)?;
+	let (i, ignore) = opt(terminated(tag_no_case("IGNORE"), shouldbespace))(i)?;
+	let (i, _) = tag_no_case("INTO")(i)?;
+	let (i, _) = shouldbespace(i)?;
+	let (i, into) = expected(
+		"a parameter or a table name",
+		cut(alt((
+			map(terminated(table, shouldbespace), Value::Table),
+			map(terminated(param, shouldbespace), Value::Param),
+		))),
+	)(i)
+	.explain("expressions aren't allowed here.", value)?;
+	let (i, data) = cut(alt((values, single)))(i)?;
 	let (i, update) = opt(preceded(shouldbespace, update))(i)?;
 	let (i, output) = opt(preceded(shouldbespace, output))(i)?;
 	let (i, timeout) = opt(preceded(shouldbespace, timeout))(i)?;
@@ -155,7 +182,6 @@ mod tests {
 	fn insert_statement_basic() {
 		let sql = "INSERT INTO test (field) VALUES ($value)";
 		let res = insert(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("INSERT INTO test (field) VALUES ($value)", format!("{}", out))
 	}
@@ -164,8 +190,15 @@ mod tests {
 	fn insert_statement_ignore() {
 		let sql = "INSERT IGNORE INTO test (field) VALUES ($value)";
 		let res = insert(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("INSERT IGNORE INTO test (field) VALUES ($value)", format!("{}", out))
+	}
+
+	#[test]
+	fn insert_statement_ignore_update() {
+		let sql = "INSERT IGNORE INTO test (field) VALUES ($value) ON DUPLICATE KEY UPDATE field = $value";
+		let res = insert(sql);
+		let out = res.unwrap().1;
+		assert_eq!("INSERT IGNORE INTO test (field) VALUES ($value) ON DUPLICATE KEY UPDATE field = $value", format!("{}", out))
 	}
 }

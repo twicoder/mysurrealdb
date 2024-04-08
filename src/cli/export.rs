@@ -1,60 +1,87 @@
+use crate::cli::abstraction::{
+	AuthArguments, DatabaseConnectionArguments, DatabaseSelectionArguments,
+};
 use crate::err::Error;
-use reqwest::blocking::Client;
-use reqwest::header::CONTENT_TYPE;
-use std::fs::OpenOptions;
-use std::io::copy;
+use clap::Args;
+use futures_util::StreamExt;
+use surrealdb::engine::any::connect;
+use surrealdb::opt::auth::Root;
+use surrealdb::opt::Config;
+use tokio::io::{self, AsyncWriteExt};
 
-pub fn init(matches: &clap::ArgMatches) -> Result<(), Error> {
-	// Ensure that the command has a file
-	// argument. If no file argument has
-	// been provided, then return an error.
+#[derive(Args, Debug)]
+pub struct ExportCommandArguments {
+	#[arg(help = "Path to the sql file to export. Use dash - to write into stdout.")]
+	#[arg(default_value = "-")]
+	#[arg(index = 1)]
+	file: String,
 
-	let file = matches.value_of("file").unwrap();
+	#[command(flatten)]
+	conn: DatabaseConnectionArguments,
+	#[command(flatten)]
+	auth: AuthArguments,
+	#[command(flatten)]
+	sel: DatabaseSelectionArguments,
+}
 
-	// Attempt to open the specified file,
-	// and if there is a problem opening
-	// the file, then return an error.
+pub async fn init(
+	ExportCommandArguments {
+		file,
+		conn: DatabaseConnectionArguments {
+			endpoint,
+		},
+		auth: AuthArguments {
+			username,
+			password,
+		},
+		sel: DatabaseSelectionArguments {
+			namespace: ns,
+			database: db,
+		},
+	}: ExportCommandArguments,
+) -> Result<(), Error> {
+	// Initialize opentelemetry and logging
+	crate::telemetry::builder().with_log_level("error").init();
 
-	let mut file = OpenOptions::new().write(true).create(true).truncate(true).open(file)?;
+	let client = if let Some((username, password)) = username.zip(password) {
+		let root = Root {
+			username: &username,
+			password: &password,
+		};
 
-	// Parse all other cli arguments
+		// Connect to the database engine with authentication
+		//
+		// * For local engines, here we enable authentication and in the signin below we actually authenticate.
+		// * For remote engines, we connect to the endpoint and then signin.
+		#[cfg(feature = "has-storage")]
+		let address = (endpoint, Config::new().user(root));
+		#[cfg(not(feature = "has-storage"))]
+		let address = endpoint;
+		let client = connect(address).await?;
 
-	let user = matches.value_of("user").unwrap();
+		// Sign in to the server
+		client.signin(root).await?;
+		client
+	} else {
+		connect(endpoint).await?
+	};
 
-	let pass = matches.value_of("pass").unwrap();
-
-	let conn = matches.value_of("conn").unwrap();
-
-	let ns = matches.value_of("ns").unwrap();
-
-	let db = matches.value_of("db").unwrap();
-
-	let conn = format!("{}/export", conn);
-
-	// Create and send the HTTP request
-	// specifying the basic auth header
-	// and the specified content-type.
-
-	let mut res = Client::new()
-		.get(&conn)
-		.header(CONTENT_TYPE, "application/octet-stream")
-		.basic_auth(user, Some(pass))
-		.header("NS", ns)
-		.header("DB", db)
-		.send()?
-		.error_for_status()?;
-
-	// Copy the contents of the http get
-	// response to the specified ouput
-	// file and pass along any errors.
-
-	copy(&mut res, &mut file)?;
-
-	// Output an informational message
-	// and return an Ok to signify that
-	// this command has been successful.
-
+	// Use the specified namespace / database
+	client.use_ns(ns).use_db(db).await?;
+	// Export the data from the database
+	if file == "-" {
+		// Prepare the backup
+		let mut backup = client.export(()).await?;
+		// Get a handle to standard output
+		let mut stdout = io::stdout();
+		// Write the backup to standard output
+		while let Some(bytes) = backup.next().await {
+			stdout.write_all(&bytes?).await?;
+		}
+	} else {
+		client.export(file).await?;
+	}
 	info!("The SQL file was exported successfully");
-
+	// Everything OK
 	Ok(())
 }

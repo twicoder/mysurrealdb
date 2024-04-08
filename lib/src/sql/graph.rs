@@ -1,53 +1,84 @@
-use crate::sql::comment::mightbespace;
 use crate::sql::comment::shouldbespace;
+use crate::sql::common::{closeparentheses, openparentheses};
 use crate::sql::cond::{cond, Cond};
 use crate::sql::dir::{dir, Dir};
 use crate::sql::error::IResult;
-use crate::sql::idiom::{idiom, Idiom};
+use crate::sql::field::Fields;
+use crate::sql::group::Groups;
+use crate::sql::idiom::{plain as idiom, Idiom};
+use crate::sql::limit::Limit;
+use crate::sql::order::Orders;
+use crate::sql::split::Splits;
+use crate::sql::start::Start;
 use crate::sql::table::{table, tables, Tables};
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
 use nom::character::complete::char;
-use nom::combinator::map;
-use nom::combinator::opt;
+use nom::combinator::{map, opt};
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::fmt::{self, Display, Formatter, Write};
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
+use super::util::expect_delimited;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub struct Graph {
 	pub dir: Dir,
+	pub expr: Fields,
 	pub what: Tables,
 	pub cond: Option<Cond>,
+	pub split: Option<Splits>,
+	pub group: Option<Groups>,
+	pub order: Option<Orders>,
+	pub limit: Option<Limit>,
+	pub start: Option<Start>,
 	pub alias: Option<Idiom>,
 }
 
 impl Graph {
+	/// Convert the graph edge to a raw String
 	pub fn to_raw(&self) -> String {
 		self.to_string()
 	}
 }
 
-impl fmt::Display for Graph {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl Display for Graph {
+	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
 		if self.what.0.len() <= 1 && self.cond.is_none() && self.alias.is_none() {
-			write!(f, "{}", self.dir)?;
+			Display::fmt(&self.dir, f)?;
 			match self.what.len() {
-				0 => write!(f, "?"),
-				_ => write!(f, "{}", self.what),
+				0 => f.write_char('?'),
+				_ => Display::fmt(&self.what, f),
 			}
 		} else {
 			write!(f, "{}(", self.dir)?;
 			match self.what.len() {
-				0 => write!(f, "?"),
-				_ => write!(f, "{}", self.what),
+				0 => f.write_char('?'),
+				_ => Display::fmt(&self.what, f),
 			}?;
 			if let Some(ref v) = self.cond {
-				write!(f, " {}", v)?
+				write!(f, " {v}")?
+			}
+			if let Some(ref v) = self.split {
+				write!(f, " {v}")?
+			}
+			if let Some(ref v) = self.group {
+				write!(f, " {v}")?
+			}
+			if let Some(ref v) = self.order {
+				write!(f, " {v}")?
+			}
+			if let Some(ref v) = self.limit {
+				write!(f, " {v}")?
+			}
+			if let Some(ref v) = self.start {
+				write!(f, " {v}")?
 			}
 			if let Some(ref v) = self.alias {
-				write!(f, " AS {}", v)?
+				write!(f, " AS {v}")?
 			}
-			write!(f, ")")
+			f.write_char(')')
 		}
 	}
 }
@@ -59,9 +90,15 @@ pub fn graph(i: &str) -> IResult<&str, Graph> {
 		i,
 		Graph {
 			dir,
+			expr: Fields::all(),
 			what,
 			cond,
 			alias,
+			split: None,
+			group: None,
+			order: None,
+			limit: None,
+			start: None,
 		},
 	))
 }
@@ -72,24 +109,26 @@ fn simple(i: &str) -> IResult<&str, (Tables, Option<Cond>, Option<Idiom>)> {
 }
 
 fn custom(i: &str) -> IResult<&str, (Tables, Option<Cond>, Option<Idiom>)> {
-	let (i, _) = char('(')(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, w) = alt((any, tables))(i)?;
-	let (i, c) = opt(|i| {
-		let (i, _) = shouldbespace(i)?;
-		let (i, v) = cond(i)?;
-		Ok((i, v))
-	})(i)?;
-	let (i, a) = opt(|i| {
-		let (i, _) = shouldbespace(i)?;
-		let (i, _) = tag_no_case("AS")(i)?;
-		let (i, _) = shouldbespace(i)?;
-		let (i, v) = idiom(i)?;
-		Ok((i, v))
-	})(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, _) = char(')')(i)?;
-	Ok((i, (w, c, a)))
+	expect_delimited(
+		openparentheses,
+		|i| {
+			let (i, w) = alt((any, tables))(i)?;
+			let (i, c) = opt(|i| {
+				let (i, _) = shouldbespace(i)?;
+				let (i, v) = cond(i)?;
+				Ok((i, v))
+			})(i)?;
+			let (i, a) = opt(|i| {
+				let (i, _) = shouldbespace(i)?;
+				let (i, _) = tag_no_case("AS")(i)?;
+				let (i, _) = shouldbespace(i)?;
+				let (i, v) = idiom(i)?;
+				Ok((i, v))
+			})(i)?;
+			Ok((i, (w, c, a)))
+		},
+		closeparentheses,
+	)(i)
 }
 
 fn one(i: &str) -> IResult<&str, Tables> {
@@ -110,7 +149,6 @@ mod tests {
 	fn graph_in() {
 		let sql = "<-likes";
 		let res = graph(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("<-likes", format!("{}", out));
 	}
@@ -119,7 +157,6 @@ mod tests {
 	fn graph_out() {
 		let sql = "->likes";
 		let res = graph(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("->likes", format!("{}", out));
 	}
@@ -128,7 +165,6 @@ mod tests {
 	fn graph_both() {
 		let sql = "<->likes";
 		let res = graph(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("<->likes", format!("{}", out));
 	}
@@ -137,7 +173,6 @@ mod tests {
 	fn graph_multiple() {
 		let sql = "->(likes, follows)";
 		let res = graph(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("->(likes, follows)", format!("{}", out));
 	}
@@ -146,7 +181,6 @@ mod tests {
 	fn graph_aliases() {
 		let sql = "->(likes, follows AS connections)";
 		let res = graph(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("->(likes, follows AS connections)", format!("{}", out));
 	}
@@ -155,7 +189,6 @@ mod tests {
 	fn graph_conditions() {
 		let sql = "->(likes, follows WHERE influencer = true)";
 		let res = graph(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("->(likes, follows WHERE influencer = true)", format!("{}", out));
 	}
@@ -164,7 +197,6 @@ mod tests {
 	fn graph_conditions_aliases() {
 		let sql = "->(likes, follows WHERE influencer = true AS connections)";
 		let res = graph(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("->(likes, follows WHERE influencer = true AS connections)", format!("{}", out));
 	}

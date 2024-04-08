@@ -1,18 +1,28 @@
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
+use bincode::Options;
+use bincode::Result;
+use serde::{Deserialize, Serialize};
 
-thread_local! {
-	static INTERNAL_SERIALIZATION: AtomicBool = AtomicBool::new(false);
+pub fn serialize<T: ?Sized>(value: &T) -> Result<Vec<u8>>
+where
+	T: Serialize,
+{
+	bincode::options()
+		.with_no_limit()
+		.with_little_endian()
+		.with_varint_encoding()
+		.reject_trailing_bytes()
+		.serialize(value)
 }
 
-pub(crate) fn is_internal_serialization() -> bool {
-	INTERNAL_SERIALIZATION.with(|v| v.load(Ordering::Relaxed))
-}
-
-pub(crate) fn beg_internal_serialization() {
-	INTERNAL_SERIALIZATION.with(|v| v.store(true, Ordering::Relaxed))
-}
-
-pub(crate) fn end_internal_serialization() {
-	INTERNAL_SERIALIZATION.with(|v| v.store(false, Ordering::Relaxed))
+pub fn deserialize<'a, T>(bytes: &'a [u8]) -> Result<T>
+where
+	T: Deserialize<'a>,
+{
+	bincode::options()
+		.with_no_limit()
+		.with_little_endian()
+		.with_varint_encoding()
+		// Ignore extra fields so we can pull out the ID only from responses that fail to deserialise
+		.allow_trailing_bytes()
+		.deserialize(bytes)
 }

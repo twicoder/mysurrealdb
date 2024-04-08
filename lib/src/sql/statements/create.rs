@@ -1,10 +1,9 @@
 use crate::ctx::Context;
-use crate::dbs::Iterable;
 use crate::dbs::Iterator;
-use crate::dbs::Level;
 use crate::dbs::Options;
 use crate::dbs::Statement;
 use crate::dbs::Transaction;
+use crate::doc::CursorDoc;
 use crate::err::Error;
 use crate::sql::comment::shouldbespace;
 use crate::sql::data::{data, Data};
@@ -14,13 +13,18 @@ use crate::sql::timeout::{timeout, Timeout};
 use crate::sql::value::{whats, Value, Values};
 use derive::Store;
 use nom::bytes::complete::tag_no_case;
+use nom::combinator::cut;
 use nom::combinator::opt;
 use nom::sequence::preceded;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Store, Hash)]
+#[revisioned(revision = 2)]
 pub struct CreateStatement {
+	#[revision(start = 2)]
+	pub only: bool,
 	pub what: Values,
 	pub data: Option<Data>,
 	pub output: Option<Output>,
@@ -29,96 +33,71 @@ pub struct CreateStatement {
 }
 
 impl CreateStatement {
+	/// Check if we require a writeable transaction
 	pub(crate) fn writeable(&self) -> bool {
 		true
 	}
-
+	/// Process this type returning a computed simple Value
 	pub(crate) async fn compute(
 		&self,
 		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
-		doc: Option<&Value>,
+		doc: Option<&CursorDoc<'_>>,
 	) -> Result<Value, Error> {
-		// Allowed to run?
-		opt.check(Level::No)?;
+		// Valid options?
+		opt.valid_for_db()?;
 		// Create a new iterator
 		let mut i = Iterator::new();
+		// Assign the statement
+		let stm = Statement::from(self);
 		// Ensure futures are stored
-		let opt = &opt.futures(false);
+		let opt = &opt.new_with_futures(false);
 		// Loop over the create targets
 		for w in self.what.0.iter() {
 			let v = w.compute(ctx, opt, txn, doc).await?;
-			match v {
-				Value::Table(v) => i.ingest(Iterable::Thing(v.generate())),
-				Value::Thing(v) => i.ingest(Iterable::Thing(v)),
-				Value::Model(v) => {
-					for v in v {
-						i.ingest(Iterable::Thing(v));
-					}
-				}
-				Value::Array(v) => {
-					for v in v {
-						match v {
-							Value::Table(v) => i.ingest(Iterable::Thing(v.generate())),
-							Value::Thing(v) => i.ingest(Iterable::Thing(v)),
-							Value::Model(v) => {
-								for v in v {
-									i.ingest(Iterable::Thing(v));
-								}
-							}
-							Value::Object(v) => match v.rid() {
-								Some(v) => i.ingest(Iterable::Thing(v)),
-								None => {
-									return Err(Error::CreateStatement {
-										value: v.to_string(),
-									})
-								}
-							},
-							v => {
-								return Err(Error::CreateStatement {
-									value: v.to_string(),
-								})
-							}
-						};
-					}
-				}
-				Value::Object(v) => match v.rid() {
-					Some(v) => i.ingest(Iterable::Thing(v)),
-					None => {
-						return Err(Error::CreateStatement {
-							value: v.to_string(),
-						})
-					}
+			i.prepare(ctx, opt, txn, &stm, v).await.map_err(|e| match e {
+				Error::InvalidStatementTarget {
+					value: v,
+				} => Error::CreateStatement {
+					value: v,
 				},
-				v => {
-					return Err(Error::CreateStatement {
-						value: v.to_string(),
-					})
-				}
-			};
+				e => e,
+			})?;
 		}
-		// Assign the statement
-		let stm = Statement::from(self);
 		// Output the results
-		i.output(ctx, opt, txn, &stm).await
+		match i.output(ctx, opt, txn, &stm).await? {
+			// This is a single record result
+			Value::Array(mut a) if self.only => match a.len() {
+				// There was exactly one result
+				1 => Ok(a.remove(0)),
+				// There were no results
+				_ => Err(Error::SingleOnlyOutput),
+			},
+			// This is standard query result
+			v => Ok(v),
+		}
 	}
 }
 
 impl fmt::Display for CreateStatement {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "CREATE {}", self.what)?;
+		write!(f, "CREATE")?;
+		if self.only {
+			f.write_str(" ONLY")?
+		}
+		write!(f, " {}", self.what)?;
 		if let Some(ref v) = self.data {
-			write!(f, " {}", v)?
+			write!(f, " {v}")?
 		}
 		if let Some(ref v) = self.output {
-			write!(f, " {}", v)?
+			write!(f, " {v}")?
 		}
 		if let Some(ref v) = self.timeout {
-			write!(f, " {}", v)?
+			write!(f, " {v}")?
 		}
 		if self.parallel {
-			write!(f, " PARALLEL")?
+			f.write_str(" PARALLEL")?
 		}
 		Ok(())
 	}
@@ -126,15 +105,20 @@ impl fmt::Display for CreateStatement {
 
 pub fn create(i: &str) -> IResult<&str, CreateStatement> {
 	let (i, _) = tag_no_case("CREATE")(i)?;
+	let (i, only) = opt(preceded(shouldbespace, tag_no_case("ONLY")))(i)?;
 	let (i, _) = shouldbespace(i)?;
 	let (i, what) = whats(i)?;
-	let (i, data) = opt(preceded(shouldbespace, data))(i)?;
-	let (i, output) = opt(preceded(shouldbespace, output))(i)?;
-	let (i, timeout) = opt(preceded(shouldbespace, timeout))(i)?;
-	let (i, parallel) = opt(preceded(shouldbespace, tag_no_case("PARALLEL")))(i)?;
+	let (i, (data, output, timeout, parallel)) = cut(|i| {
+		let (i, data) = opt(preceded(shouldbespace, data))(i)?;
+		let (i, output) = opt(preceded(shouldbespace, output))(i)?;
+		let (i, timeout) = opt(preceded(shouldbespace, timeout))(i)?;
+		let (i, parallel) = opt(preceded(shouldbespace, tag_no_case("PARALLEL")))(i)?;
+		Ok((i, (data, output, timeout, parallel)))
+	})(i)?;
 	Ok((
 		i,
 		CreateStatement {
+			only: only.is_some(),
 			what,
 			data,
 			output,
@@ -153,7 +137,6 @@ mod tests {
 	fn create_statement() {
 		let sql = "CREATE test";
 		let res = create(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("CREATE test", format!("{}", out))
 	}

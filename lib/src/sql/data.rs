@@ -1,20 +1,28 @@
+use crate::ctx::Context;
+use crate::dbs::{Options, Transaction};
+use crate::err::Error;
 use crate::sql::comment::mightbespace;
 use crate::sql::comment::shouldbespace;
 use crate::sql::common::commas;
 use crate::sql::error::IResult;
-use crate::sql::idiom::{idiom, Idiom};
+use crate::sql::fmt::Fmt;
+use crate::sql::idiom::{plain as idiom, Idiom};
 use crate::sql::operator::{assigner, Operator};
 use crate::sql::value::{value, Value};
 use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
+use nom::combinator::cut;
 use nom::multi::separated_list1;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::fmt::{self, Display, Formatter};
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub enum Data {
 	EmptyExpression,
 	SetExpression(Vec<(Idiom, Operator, Value)>),
+	UnsetExpression(Vec<Idiom>),
 	PatchExpression(Value),
 	MergeExpression(Value),
 	ReplaceExpression(Value),
@@ -25,100 +33,141 @@ pub enum Data {
 }
 
 impl Default for Data {
-	fn default() -> Data {
-		Data::EmptyExpression
+	fn default() -> Self {
+		Self::EmptyExpression
 	}
 }
 
-impl fmt::Display for Data {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl Data {
+	/// Fetch the 'id' field if one has been specified
+	pub(crate) async fn rid(
+		&self,
+		ctx: &Context<'_>,
+		opt: &Options,
+		txn: &Transaction,
+	) -> Result<Option<Value>, Error> {
 		match self {
-			Data::EmptyExpression => write!(f, ""),
-			Data::SetExpression(v) => write!(
+			Self::MergeExpression(v) => {
+				// This MERGE expression has an 'id' field
+				Ok(v.compute(ctx, opt, txn, None).await?.rid().some())
+			}
+			Self::ReplaceExpression(v) => {
+				// This REPLACE expression has an 'id' field
+				Ok(v.compute(ctx, opt, txn, None).await?.rid().some())
+			}
+			Self::ContentExpression(v) => {
+				// This CONTENT expression has an 'id' field
+				Ok(v.compute(ctx, opt, txn, None).await?.rid().some())
+			}
+			Self::SetExpression(v) => match v.iter().find(|f| f.0.is_id()) {
+				Some((_, _, v)) => {
+					// This SET expression has an 'id' field
+					Ok(v.compute(ctx, opt, txn, None).await?.some())
+				}
+				// This SET expression had no 'id' field
+				_ => Ok(None),
+			},
+			// Generate a random id for all other data clauses
+			_ => Ok(None),
+		}
+	}
+}
+
+impl Display for Data {
+	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+		match self {
+			Self::EmptyExpression => Ok(()),
+			Self::SetExpression(v) => write!(
 				f,
 				"SET {}",
-				v.iter()
-					.map(|(l, o, r)| format!("{} {} {}", l, o, r))
-					.collect::<Vec<_>>()
-					.join(", ")
+				Fmt::comma_separated(
+					v.iter().map(|args| Fmt::new(args, |(l, o, r), f| write!(f, "{l} {o} {r}",)))
+				)
 			),
-			Data::PatchExpression(v) => write!(f, "PATCH {}", v),
-			Data::MergeExpression(v) => write!(f, "MERGE {}", v),
-			Data::ReplaceExpression(v) => write!(f, "REPLACE {}", v),
-			Data::ContentExpression(v) => write!(f, "CONTENT {}", v),
-			Data::SingleExpression(v) => write!(f, "{}", v),
-			Data::ValuesExpression(v) => write!(
+			Self::UnsetExpression(v) => write!(
+				f,
+				"UNSET {}",
+				Fmt::comma_separated(v.iter().map(|args| Fmt::new(args, |l, f| write!(f, "{l}",))))
+			),
+			Self::PatchExpression(v) => write!(f, "PATCH {v}"),
+			Self::MergeExpression(v) => write!(f, "MERGE {v}"),
+			Self::ReplaceExpression(v) => write!(f, "REPLACE {v}"),
+			Self::ContentExpression(v) => write!(f, "CONTENT {v}"),
+			Self::SingleExpression(v) => Display::fmt(v, f),
+			Self::ValuesExpression(v) => write!(
 				f,
 				"({}) VALUES {}",
-				v.first()
-					.unwrap()
-					.iter()
-					.map(|v| format!("{}", v.0))
-					.collect::<Vec<_>>()
-					.join(", "),
-				v.iter()
-					.map(|v| format!(
-						"({})",
-						v.iter().map(|v| format!("{}", v.1)).collect::<Vec<_>>().join(", ")
-					))
-					.collect::<Vec<_>>()
-					.join(", ")
+				Fmt::comma_separated(v.first().unwrap().iter().map(|(v, _)| v)),
+				Fmt::comma_separated(v.iter().map(|v| Fmt::new(v, |v, f| write!(
+					f,
+					"({})",
+					Fmt::comma_separated(v.iter().map(|(_, v)| v))
+				))))
 			),
-			Data::UpdateExpression(v) => write!(
+			Self::UpdateExpression(v) => write!(
 				f,
 				"ON DUPLICATE KEY UPDATE {}",
-				v.iter()
-					.map(|(l, o, r)| format!("{} {} {}", l, o, r))
-					.collect::<Vec<_>>()
-					.join(", ")
+				Fmt::comma_separated(
+					v.iter().map(|args| Fmt::new(args, |(l, o, r), f| write!(f, "{l} {o} {r}",)))
+				)
 			),
 		}
 	}
 }
 
 pub fn data(i: &str) -> IResult<&str, Data> {
-	alt((set, patch, merge, replace, content))(i)
+	alt((set, unset, patch, merge, replace, content))(i)
 }
 
 fn set(i: &str) -> IResult<&str, Data> {
 	let (i, _) = tag_no_case("SET")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, v) = separated_list1(commas, |i| {
-		let (i, l) = idiom(i)?;
-		let (i, _) = mightbespace(i)?;
-		let (i, o) = assigner(i)?;
-		let (i, _) = mightbespace(i)?;
-		let (i, r) = value(i)?;
-		Ok((i, (l, o, r)))
-	})(i)?;
+	let (i, v) = cut(separated_list1(
+		commas,
+		cut(|i| {
+			let (i, l) = idiom(i)?;
+			let (i, _) = mightbespace(i)?;
+			let (i, o) = assigner(i)?;
+			let (i, _) = mightbespace(i)?;
+			let (i, r) = value(i)?;
+			Ok((i, (l, o, r)))
+		}),
+	))(i)?;
 	Ok((i, Data::SetExpression(v)))
+}
+
+fn unset(i: &str) -> IResult<&str, Data> {
+	let (i, _) = tag_no_case("UNSET")(i)?;
+	let (i, _) = shouldbespace(i)?;
+	let (i, v) = cut(separated_list1(commas, idiom))(i)?;
+	Ok((i, Data::UnsetExpression(v)))
 }
 
 fn patch(i: &str) -> IResult<&str, Data> {
 	let (i, _) = tag_no_case("PATCH")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, v) = value(i)?;
+	let (i, v) = cut(value)(i)?;
 	Ok((i, Data::PatchExpression(v)))
 }
 
 fn merge(i: &str) -> IResult<&str, Data> {
 	let (i, _) = tag_no_case("MERGE")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, v) = value(i)?;
+	let (i, v) = cut(value)(i)?;
 	Ok((i, Data::MergeExpression(v)))
 }
 
 fn replace(i: &str) -> IResult<&str, Data> {
 	let (i, _) = tag_no_case("REPLACE")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, v) = value(i)?;
+	let (i, v) = cut(value)(i)?;
 	Ok((i, Data::ReplaceExpression(v)))
 }
 
 fn content(i: &str) -> IResult<&str, Data> {
 	let (i, _) = tag_no_case("CONTENT")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, v) = value(i)?;
+	let (i, v) = cut(value)(i)?;
 	Ok((i, Data::ContentExpression(v)))
 }
 
@@ -129,6 +178,7 @@ pub fn single(i: &str) -> IResult<&str, Data> {
 
 pub fn values(i: &str) -> IResult<&str, Data> {
 	let (i, _) = tag_no_case("(")(i)?;
+	// TODO: look at call tree here.
 	let (i, fields) = separated_list1(commas, idiom)(i)?;
 	let (i, _) = tag_no_case(")")(i)?;
 	let (i, _) = shouldbespace(i)?;
@@ -143,10 +193,7 @@ pub fn values(i: &str) -> IResult<&str, Data> {
 	Ok((
 		i,
 		Data::ValuesExpression(
-			values
-				.into_iter()
-				.map(|row| fields.iter().cloned().zip(row.into_iter()).collect())
-				.collect(),
+			values.into_iter().map(|row| fields.iter().cloned().zip(row).collect()).collect(),
 		),
 	))
 }
@@ -174,7 +221,6 @@ mod tests {
 	fn set_statement() {
 		let sql = "SET field = true";
 		let res = data(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("SET field = true", format!("{}", out));
 	}
@@ -183,16 +229,30 @@ mod tests {
 	fn set_statement_multiple() {
 		let sql = "SET field = true, other.field = false";
 		let res = data(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("SET field = true, other.field = false", format!("{}", out));
+	}
+
+	#[test]
+	fn unset_statement() {
+		let sql = "UNSET field";
+		let res = data(sql);
+		let out = res.unwrap().1;
+		assert_eq!("UNSET field", format!("{}", out));
+	}
+
+	#[test]
+	fn unset_statement_multiple_fields() {
+		let sql = "UNSET field, other.field";
+		let res = data(sql);
+		let out = res.unwrap().1;
+		assert_eq!("UNSET field, other.field", format!("{}", out));
 	}
 
 	#[test]
 	fn patch_statement() {
 		let sql = "PATCH [{ field: true }]";
 		let res = patch(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("PATCH [{ field: true }]", format!("{}", out));
 	}
@@ -201,7 +261,6 @@ mod tests {
 	fn merge_statement() {
 		let sql = "MERGE { field: true }";
 		let res = data(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("MERGE { field: true }", format!("{}", out));
 	}
@@ -210,7 +269,6 @@ mod tests {
 	fn content_statement() {
 		let sql = "CONTENT { field: true }";
 		let res = data(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("CONTENT { field: true }", format!("{}", out));
 	}
@@ -219,7 +277,6 @@ mod tests {
 	fn replace_statement() {
 		let sql = "REPLACE { field: true }";
 		let res = data(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("REPLACE { field: true }", format!("{}", out));
 	}
@@ -228,7 +285,6 @@ mod tests {
 	fn values_statement() {
 		let sql = "(one, two, three) VALUES ($param, true, [1, 2, 3]), ($param, false, [4, 5, 6])";
 		let res = values(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(
 			"(one, two, three) VALUES ($param, true, [1, 2, 3]), ($param, false, [4, 5, 6])",
@@ -240,7 +296,6 @@ mod tests {
 	fn update_statement() {
 		let sql = "ON DUPLICATE KEY UPDATE field = true, other.field = false";
 		let res = update(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("ON DUPLICATE KEY UPDATE field = true, other.field = false", format!("{}", out));
 	}

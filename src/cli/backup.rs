@@ -1,114 +1,144 @@
+use crate::cli::abstraction::AuthArguments;
+use crate::cnf::SERVER_AGENT;
 use crate::err::Error;
-use reqwest::blocking::Body;
-use reqwest::blocking::Client;
+use clap::Args;
+use futures::TryStreamExt;
 use reqwest::header::CONTENT_TYPE;
-use std::fs::OpenOptions;
-use std::io::copy;
+use reqwest::header::USER_AGENT;
+use reqwest::{Body, Client, Response};
+use std::io::ErrorKind;
+use tokio::fs::OpenOptions;
+use tokio::io::{copy, stdin, stdout, AsyncWrite, AsyncWriteExt};
+use tokio_util::io::{ReaderStream, StreamReader};
 
 const TYPE: &str = "application/octet-stream";
 
-pub fn init(matches: &clap::ArgMatches) -> Result<(), Error> {
-	// Attempt to open the specified file,
-	// and if there is a problem opening
-	// the file, then return an error.
+#[derive(Args, Debug)]
+pub struct BackupCommandArguments {
+	#[arg(help = "Path to the remote database or file from which to export")]
+	#[arg(value_parser = super::validator::into_valid)]
+	from: String,
+	#[arg(help = "Path to the remote database or file into which to import")]
+	#[arg(default_value = "-")]
+	#[arg(value_parser = super::validator::into_valid)]
+	into: String,
+	#[command(flatten)]
+	auth: AuthArguments,
+}
 
-	let from = matches.value_of("from").unwrap();
+pub async fn init(
+	BackupCommandArguments {
+		from,
+		into,
+		auth: AuthArguments {
+			username: user,
+			password: pass,
+		},
+	}: BackupCommandArguments,
+) -> Result<(), Error> {
+	// Initialize opentelemetry and logging
+	crate::telemetry::builder().with_log_level("error").init();
 
-	// Attempt to open the specified file,
-	// and if there is a problem opening
-	// the file, then return an error.
-
-	let into = matches.value_of("into").unwrap();
-
-	// Process the response, checking
-	// for any errors, and outputting
-	// the responses back to the user.
-
-	if from.ends_with(".db") && into.ends_with(".db") {
-		backup_file_to_file(matches, from, into)
-	} else if from.ends_with(".db") {
-		backup_file_to_http(matches, from, into)
-	} else if into.ends_with(".db") {
-		backup_http_to_file(matches, from, into)
-	} else {
-		backup_http_to_http(matches, from, into)
+	// Process the source->destination response
+	let into_local = into.ends_with(".db");
+	let from_local = from.ends_with(".db");
+	match (from.as_str(), into.as_str()) {
+		// From Stdin -> Into Stdout (are you trying to make an ouroboros?)
+		("-", "-") => Err(Error::OperationUnsupported),
+		// From Stdin -> Into File (possible but meaningless)
+		("-", _) if into_local => Err(Error::OperationUnsupported),
+		// From File -> Into Stdout (possible but meaningless, could be useful for source validation but not for now)
+		(_, "-") if from_local => Err(Error::OperationUnsupported),
+		// From File -> Into File (also possible but meaningless,
+		// but since the original function had this, I would choose to keep it as of now)
+		(from, into) if from_local && into_local => {
+			tokio::fs::copy(from, into).await?;
+			Ok(())
+		}
+		// From File -> Into HTTP
+		(from, into) if from_local => {
+			// Copy the data to the destination
+			let from = OpenOptions::new().read(true).open(from).await?;
+			post_http_sync_body(from, into, user.as_deref(), pass.as_deref()).await
+		}
+		// From HTTP -> Into File
+		(from, into) if into_local => {
+			// Try to open the output file
+			let into =
+				OpenOptions::new().write(true).create(true).truncate(true).open(into).await?;
+			backup_http_to_file(from, into, user.as_deref(), pass.as_deref()).await
+		}
+		// From HTTP -> Into Stdout
+		(from, "-") => backup_http_to_file(from, stdout(), user.as_deref(), pass.as_deref()).await,
+		// From Stdin -> Into File
+		("-", into) => {
+			let from = Body::wrap_stream(ReaderStream::new(stdin()));
+			post_http_sync_body(from, into, user.as_deref(), pass.as_deref()).await
+		}
+		// From HTTP -> Into HTTP
+		(from, into) => {
+			// Copy the data to the destination
+			let from = get_http_sync_body(from, user.as_deref(), pass.as_deref()).await?;
+			post_http_sync_body(from, into, user.as_deref(), pass.as_deref()).await
+		}
 	}
 }
 
-fn backup_file_to_file(_: &clap::ArgMatches, from: &str, into: &str) -> Result<(), Error> {
-	let mut from = OpenOptions::new().read(true).open(from)?;
+async fn post_http_sync_body<B: Into<Body>>(
+	from: B,
+	into: &str,
+	user: Option<&str>,
+	pass: Option<&str>,
+) -> Result<(), Error> {
+	let mut req = Client::new()
+		.post(format!("{into}/sync"))
+		.header(USER_AGENT, SERVER_AGENT)
+		.header(CONTENT_TYPE, TYPE)
+		.body(from);
 
-	let mut into = OpenOptions::new().write(true).create(true).truncate(true).open(into)?;
+	// Add authentication if needed
+	if let Some(user) = user {
+		req = req.basic_auth(user, pass);
+	}
 
-	copy(&mut from, &mut into)?;
-
+	req.send().await?.error_for_status()?;
 	Ok(())
 }
 
-fn backup_http_to_file(matches: &clap::ArgMatches, from: &str, into: &str) -> Result<(), Error> {
-	let user = matches.value_of("user").unwrap();
+async fn get_http_sync_body(
+	from: &str,
+	user: Option<&str>,
+	pass: Option<&str>,
+) -> Result<Response, Error> {
+	let mut req = Client::new()
+		.get(format!("{from}/sync"))
+		.header(USER_AGENT, SERVER_AGENT)
+		.header(CONTENT_TYPE, TYPE);
 
-	let pass = matches.value_of("pass").unwrap();
+	// Add authentication if needed
+	if let Some(user) = user {
+		req = req.basic_auth(user, pass);
+	}
 
-	let from = format!("{}/sync", from);
-
-	let mut from = Client::new()
-		.get(&from)
-		.basic_auth(user, Some(pass))
-		.header(CONTENT_TYPE, TYPE)
-		.send()?
-		.error_for_status()?;
-
-	let mut into = OpenOptions::new().write(true).create(true).truncate(true).open(into)?;
-
-	copy(&mut from, &mut into)?;
-
-	Ok(())
+	Ok(req.send().await?.error_for_status()?)
 }
 
-fn backup_file_to_http(matches: &clap::ArgMatches, from: &str, into: &str) -> Result<(), Error> {
-	let user = matches.value_of("user").unwrap();
+async fn backup_http_to_file<W: AsyncWrite + Unpin>(
+	from: &str,
+	mut into: W,
+	user: Option<&str>,
+	pass: Option<&str>,
+) -> Result<(), Error> {
+	let mut from = StreamReader::new(
+		get_http_sync_body(from, user, pass)
+			.await?
+			.bytes_stream()
+			.map_err(|x| std::io::Error::new(ErrorKind::Other, x)),
+	);
 
-	let pass = matches.value_of("pass").unwrap();
-
-	let into = format!("{}/sync", into);
-
-	let from = OpenOptions::new().read(true).open(from)?;
-
-	Client::new()
-		.post(&into)
-		.basic_auth(user, Some(pass))
-		.header(CONTENT_TYPE, TYPE)
-		.body(from)
-		.send()?
-		.error_for_status()?;
-
-	Ok(())
-}
-
-fn backup_http_to_http(matches: &clap::ArgMatches, from: &str, into: &str) -> Result<(), Error> {
-	let user = matches.value_of("user").unwrap();
-
-	let pass = matches.value_of("pass").unwrap();
-
-	let from = format!("{}/sync", from);
-
-	let into = format!("{}/sync", into);
-
-	let from = Client::new()
-		.get(&from)
-		.basic_auth(user, Some(pass))
-		.header(CONTENT_TYPE, TYPE)
-		.send()?
-		.error_for_status()?;
-
-	Client::new()
-		.post(&into)
-		.basic_auth(user, Some(pass))
-		.header(CONTENT_TYPE, TYPE)
-		.body(Body::new(from))
-		.send()?
-		.error_for_status()?;
-
+	// Copy the data to the destination
+	copy(&mut from, &mut into).await?;
+	into.flush().await?;
+	// Everything OK
 	Ok(())
 }

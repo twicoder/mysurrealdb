@@ -1,41 +1,23 @@
-use once_cell::sync::OnceCell;
-use std::net::SocketAddr;
+#[cfg(feature = "has-storage")]
+use crate::net::client_ip::ClientIp;
+#[cfg(feature = "has-storage")]
+use std::sync::OnceLock;
+use std::{net::SocketAddr, path::PathBuf};
 
-pub static CF: OnceCell<Config> = OnceCell::new();
+#[cfg(feature = "has-storage")]
+pub static CF: OnceLock<Config> = OnceLock::new();
+
+use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct Config {
 	pub bind: SocketAddr,
 	pub path: String,
-	pub user: String,
-	pub pass: String,
-	pub crt: Option<String>,
-	pub key: Option<String>,
-}
-
-pub fn init(matches: &clap::ArgMatches) {
-	// Parse the server binding address
-	let bind = matches
-		.value_of("bind")
-		.unwrap()
-		.parse::<SocketAddr>()
-		.expect("Unable to parse socket address");
-	// Parse the database endpoint path
-	let path = matches.value_of("path").unwrap().to_owned();
-	// Parse the root username for authentication
-	let user = matches.value_of("user").unwrap().to_owned();
-	// Parse the root password for authentication
-	let pass = matches.value_of("pass").unwrap().to_owned();
-	// Parse any TLS server security options
-	let crt = matches.value_of("web-crt").map(|v| v.to_owned());
-	let key = matches.value_of("web-key").map(|v| v.to_owned());
-	// Store the new config object
-	let _ = CF.set(Config {
-		bind,
-		path,
-		user,
-		pass,
-		crt,
-		key,
-	});
+	#[cfg(feature = "has-storage")]
+	pub client_ip: ClientIp,
+	pub user: Option<String>,
+	pub pass: Option<String>,
+	pub crt: Option<PathBuf>,
+	pub key: Option<PathBuf>,
+	pub tick_interval: Duration,
 }

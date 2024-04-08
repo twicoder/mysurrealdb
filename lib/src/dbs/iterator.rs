@@ -1,67 +1,265 @@
 use crate::ctx::Canceller;
 use crate::ctx::Context;
-use crate::dbs::Options;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::dbs::distinct::AsyncDistinct;
+use crate::dbs::distinct::SyncDistinct;
+use crate::dbs::explanation::Explanation;
 use crate::dbs::Statement;
-use crate::dbs::Transaction;
+use crate::dbs::{Options, Transaction};
 use crate::doc::Document;
 use crate::err::Error;
+use crate::idx::docids::DocId;
+use crate::idx::planner::executor::IteratorRef;
 use crate::sql::array::Array;
 use crate::sql::edges::Edges;
 use crate::sql::field::Field;
-use crate::sql::part::Part;
+use crate::sql::range::Range;
 use crate::sql::table::Table;
 use crate::sql::thing::Thing;
 use crate::sql::value::Value;
 use async_recursion::async_recursion;
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::mem;
 
-pub enum Iterable {
+pub(crate) enum Iterable {
 	Value(Value),
 	Table(Table),
 	Thing(Thing),
+	Range(Range),
 	Edges(Edges),
 	Mergeable(Thing, Value),
 	Relatable(Thing, Thing, Thing),
+	Index(Table, IteratorRef),
 }
 
-pub enum Operable {
+pub(crate) struct Processed {
+	pub(crate) ir: Option<IteratorRef>,
+	pub(crate) rid: Option<Thing>,
+	pub(crate) doc_id: Option<DocId>,
+	pub(crate) val: Operable,
+}
+
+pub(crate) enum Operable {
 	Value(Value),
 	Mergeable(Value, Value),
 	Relatable(Thing, Value, Thing),
 }
 
-pub enum Workable {
+pub(crate) enum Workable {
 	Normal,
 	Insert(Value),
 	Relate(Thing, Thing),
 }
 
 #[derive(Default)]
-pub struct Iterator {
+pub(crate) struct Iterator {
 	// Iterator status
 	run: Canceller,
+	// Iterator limit value
+	limit: Option<usize>,
+	// Iterator start value
+	start: Option<usize>,
 	// Iterator runtime error
 	error: Option<Error>,
 	// Iterator output results
+	// TODO: Should be stored on disk / (mmap?)
 	results: Vec<Value>,
 	// Iterator input values
 	entries: Vec<Iterable>,
 }
 
 impl Iterator {
-	// Creates a new iterator
+	/// Creates a new iterator
 	pub fn new() -> Self {
 		Self::default()
 	}
 
-	// Prepares a value for processing
+	/// Ingests an iterable for processing
 	pub fn ingest(&mut self, val: Iterable) {
 		self.entries.push(val)
 	}
 
-	// Process the records and output
+	/// Prepares a value for processing
+	pub async fn prepare(
+		&mut self,
+		ctx: &Context<'_>,
+		opt: &Options,
+		txn: &Transaction,
+		stm: &Statement<'_>,
+		val: Value,
+	) -> Result<(), Error> {
+		// Match the values
+		match val {
+			Value::Table(v) => match stm.data() {
+				// There is a data clause so fetch a record id
+				Some(data) => match stm {
+					Statement::Create(_) => {
+						let id = match data.rid(ctx, opt, txn).await? {
+							// Generate a new id from the id field
+							Some(id) => id.generate(&v, false)?,
+							// Generate a new random table id
+							None => v.generate(),
+						};
+						self.ingest(Iterable::Thing(id))
+					}
+					_ => {
+						// Ingest the table for scanning
+						self.ingest(Iterable::Table(v))
+					}
+				},
+				// There is no data clause so create a record id
+				None => match stm {
+					Statement::Create(_) => {
+						// Generate a new random table id
+						self.ingest(Iterable::Thing(v.generate()))
+					}
+					_ => {
+						// Ingest the table for scanning
+						self.ingest(Iterable::Table(v))
+					}
+				},
+			},
+			Value::Thing(v) => {
+				// Check if there is a data clause
+				if let Some(data) = stm.data() {
+					// Check if there is an id field specified
+					if let Some(id) = data.rid(ctx, opt, txn).await? {
+						// Check to see the type of the id
+						match id {
+							// The id is a match, so don't error
+							Value::Thing(id) if id == v => (),
+							// The id does not match
+							id => {
+								return Err(Error::IdMismatch {
+									value: id.to_string(),
+								});
+							}
+						}
+					}
+				}
+				// Add the record to the iterator
+				self.ingest(Iterable::Thing(v));
+			}
+			Value::Mock(v) => {
+				// Check if there is a data clause
+				if let Some(data) = stm.data() {
+					// Check if there is an id field specified
+					if let Some(id) = data.rid(ctx, opt, txn).await? {
+						return Err(Error::IdMismatch {
+							value: id.to_string(),
+						});
+					}
+				}
+				// Add the records to the iterator
+				for v in v {
+					self.ingest(Iterable::Thing(v))
+				}
+			}
+			Value::Range(v) => {
+				// Check if this is a create statement
+				if let Statement::Create(_) = stm {
+					return Err(Error::InvalidStatementTarget {
+						value: v.to_string(),
+					});
+				}
+				// Check if there is a data clause
+				if let Some(data) = stm.data() {
+					// Check if there is an id field specified
+					if let Some(id) = data.rid(ctx, opt, txn).await? {
+						return Err(Error::IdMismatch {
+							value: id.to_string(),
+						});
+					}
+				}
+				// Add the record to the iterator
+				self.ingest(Iterable::Range(*v));
+			}
+			Value::Edges(v) => {
+				// Check if this is a create statement
+				if let Statement::Create(_) = stm {
+					return Err(Error::InvalidStatementTarget {
+						value: v.to_string(),
+					});
+				}
+				// Check if there is a data clause
+				if let Some(data) = stm.data() {
+					// Check if there is an id field specified
+					if let Some(id) = data.rid(ctx, opt, txn).await? {
+						return Err(Error::IdMismatch {
+							value: id.to_string(),
+						});
+					}
+				}
+				// Add the record to the iterator
+				self.ingest(Iterable::Edges(*v));
+			}
+			Value::Object(v) => {
+				// Check if there is a data clause
+				if let Some(data) = stm.data() {
+					// Check if there is an id field specified
+					if let Some(id) = data.rid(ctx, opt, txn).await? {
+						return Err(Error::IdMismatch {
+							value: id.to_string(),
+						});
+					}
+				}
+				// Check if the object has an id field
+				match v.rid() {
+					Some(id) => {
+						// Add the record to the iterator
+						self.ingest(Iterable::Thing(id))
+					}
+					None => {
+						return Err(Error::InvalidStatementTarget {
+							value: v.to_string(),
+						});
+					}
+				}
+			}
+			Value::Array(v) => {
+				// Check if there is a data clause
+				if let Some(data) = stm.data() {
+					// Check if there is an id field specified
+					if let Some(id) = data.rid(ctx, opt, txn).await? {
+						return Err(Error::IdMismatch {
+							value: id.to_string(),
+						});
+					}
+				}
+				// Add the records to the iterator
+				for v in v {
+					match v {
+						Value::Thing(v) => self.ingest(Iterable::Thing(v)),
+						Value::Edges(v) => self.ingest(Iterable::Edges(*v)),
+						Value::Object(v) => match v.rid() {
+							Some(v) => self.ingest(Iterable::Thing(v)),
+							None => {
+								return Err(Error::InvalidStatementTarget {
+									value: v.to_string(),
+								})
+							}
+						},
+						_ => {
+							return Err(Error::InvalidStatementTarget {
+								value: v.to_string(),
+							})
+						}
+					}
+				}
+			}
+			v => {
+				return Err(Error::InvalidStatementTarget {
+					value: v.to_string(),
+				})
+			}
+		};
+		// All ingested ok
+		Ok(())
+	}
+
+	/// Process the records and output
 	pub async fn output(
 		&mut self,
 		ctx: &Context<'_>,
@@ -72,28 +270,77 @@ impl Iterator {
 		// Log the statement
 		trace!("Iterating: {}", stm);
 		// Enable context override
-		let mut ctx = Context::new(ctx);
-		self.run = ctx.add_cancel();
-		// Process prepared values
-		self.iterate(&ctx, opt, txn, stm).await?;
-		// Return any document errors
-		if let Some(e) = self.error.take() {
-			return Err(e);
+		let mut cancel_ctx = Context::new(ctx);
+		self.run = cancel_ctx.add_cancel();
+		// Process the query LIMIT clause
+		self.setup_limit(&cancel_ctx, opt, txn, stm).await?;
+		// Process the query START clause
+		self.setup_start(&cancel_ctx, opt, txn, stm).await?;
+		// Extract the expected behaviour depending on the presence of EXPLAIN with or without FULL
+		let (do_iterate, mut explanation) = Explanation::new(ctx, stm.explain(), &self.entries);
+
+		if do_iterate {
+			// Process prepared values
+			self.iterate(&cancel_ctx, opt, txn, stm).await?;
+			// Return any document errors
+			if let Some(e) = self.error.take() {
+				return Err(e);
+			}
+			// Process any SPLIT clause
+			self.output_split(ctx, opt, txn, stm).await?;
+			// Process any GROUP clause
+			self.output_group(ctx, opt, txn, stm).await?;
+			// Process any ORDER clause
+			self.output_order(ctx, opt, txn, stm).await?;
+			// Process any START clause
+			self.output_start(ctx, opt, txn, stm).await?;
+			// Process any LIMIT clause
+			self.output_limit(ctx, opt, txn, stm).await?;
+
+			if let Some(e) = &mut explanation {
+				e.add_fetch(self.results.len());
+				self.results.clear();
+			} else {
+				// Process any FETCH clause
+				self.output_fetch(ctx, opt, txn, stm).await?;
+			}
 		}
-		// Process any SPLIT clause
-		self.output_split(&ctx, opt, txn, stm).await?;
-		// Process any GROUP clause
-		self.output_group(&ctx, opt, txn, stm).await?;
-		// Process any ORDER clause
-		self.output_order(&ctx, opt, txn, stm).await?;
-		// Process any START clause
-		self.output_start(&ctx, opt, txn, stm).await?;
-		// Process any LIMIT clause
-		self.output_limit(&ctx, opt, txn, stm).await?;
-		// Process any FETCH clause
-		self.output_fetch(&ctx, opt, txn, stm).await?;
+
+		// Output the explanation if any
+		if let Some(e) = explanation {
+			e.output(&mut self.results);
+		}
+
 		// Output the results
 		Ok(mem::take(&mut self.results).into())
+	}
+
+	#[inline]
+	async fn setup_limit(
+		&mut self,
+		ctx: &Context<'_>,
+		opt: &Options,
+		txn: &Transaction,
+		stm: &Statement<'_>,
+	) -> Result<(), Error> {
+		if let Some(v) = stm.limit() {
+			self.limit = Some(v.process(ctx, opt, txn, None).await?);
+		}
+		Ok(())
+	}
+
+	#[inline]
+	async fn setup_start(
+		&mut self,
+		ctx: &Context<'_>,
+		opt: &Options,
+		txn: &Transaction,
+		stm: &Statement<'_>,
+	) -> Result<(), Error> {
+		if let Some(v) = stm.start() {
+			self.start = Some(v.process(ctx, opt, txn, None).await?);
+		}
+		Ok(())
 	}
 
 	#[inline]
@@ -181,36 +428,33 @@ impl Iterator {
 					let vals = Value::from(vals);
 					// Loop over each group clause
 					for field in fields.other() {
-						// Process it if it is a normal field
-						if let Field::Alone(v) = field {
-							match v {
+						// Process the field
+						if let Field::Single {
+							expr,
+							alias,
+						} = field
+						{
+							let idiom = alias
+								.as_ref()
+								.map(Cow::Borrowed)
+								.unwrap_or_else(|| Cow::Owned(expr.to_idiom()));
+							match expr {
 								Value::Function(f) if f.is_aggregate() => {
-									let x = vals
-										.all()
-										.get(ctx, opt, txn, v.to_idiom().as_ref())
-										.await?;
+									let x =
+										vals.all().get(ctx, opt, txn, None, idiom.as_ref()).await?;
 									let x = f.aggregate(x).compute(ctx, opt, txn, None).await?;
-									obj.set(ctx, opt, txn, v.to_idiom().as_ref(), x).await?;
+									obj.set(ctx, opt, txn, idiom.as_ref(), x).await?;
 								}
 								_ => {
 									let x = vals.first();
-									let x = v.compute(ctx, opt, txn, Some(&x)).await?;
-									obj.set(ctx, opt, txn, v.to_idiom().as_ref(), x).await?;
-								}
-							}
-						}
-						// Process it if it is a aliased field
-						if let Field::Alias(v, i) = field {
-							match v {
-								Value::Function(f) if f.is_aggregate() => {
-									let x = vals.all().get(ctx, opt, txn, i).await?;
-									let x = f.aggregate(x).compute(ctx, opt, txn, None).await?;
-									obj.set(ctx, opt, txn, i, x).await?;
-								}
-								_ => {
-									let x = vals.first();
-									let x = v.compute(ctx, opt, txn, Some(&x)).await?;
-									obj.set(ctx, opt, txn, i, x).await?;
+									let x = if let Some(alias) = alias {
+										let cur = (&x).into();
+										alias.compute(ctx, opt, txn, Some(&cur)).await?
+									} else {
+										let cur = (&x).into();
+										expr.compute(ctx, opt, txn, Some(&cur)).await?
+									};
+									obj.set(ctx, opt, txn, idiom.as_ref(), x).await?;
 								}
 							}
 						}
@@ -268,10 +512,10 @@ impl Iterator {
 		_ctx: &Context<'_>,
 		_opt: &Options,
 		_txn: &Transaction,
-		stm: &Statement<'_>,
+		_stm: &Statement<'_>,
 	) -> Result<(), Error> {
-		if let Some(v) = stm.start() {
-			self.results = mem::take(&mut self.results).into_iter().skip(v.0).collect();
+		if let Some(v) = self.start {
+			self.results = mem::take(&mut self.results).into_iter().skip(v).collect();
 		}
 		Ok(())
 	}
@@ -282,10 +526,10 @@ impl Iterator {
 		_ctx: &Context<'_>,
 		_opt: &Options,
 		_txn: &Transaction,
-		stm: &Statement<'_>,
+		_stm: &Statement<'_>,
 	) -> Result<(), Error> {
-		if let Some(v) = stm.limit() {
-			self.results = mem::take(&mut self.results).into_iter().take(v.0).collect();
+		if let Some(v) = self.limit {
+			self.results = mem::take(&mut self.results).into_iter().take(v).collect();
 		}
 		Ok(())
 	}
@@ -299,39 +543,19 @@ impl Iterator {
 		stm: &Statement<'_>,
 	) -> Result<(), Error> {
 		if let Some(fetchs) = stm.fetch() {
-			for fetch in &fetchs.0 {
-				// Loop over each value
+			for fetch in fetchs.iter() {
+				// Loop over each result value
 				for obj in &mut self.results {
-					// Get the value at the path
-					let val = obj.get(ctx, opt, txn, fetch).await?;
-					// Set the value at the path
-					match val {
-						Value::Array(v) => {
-							// Fetch all remote records
-							let val = Value::Array(v).get(ctx, opt, txn, &[Part::Any]).await?;
-							// Set the value at the path
-							obj.set(ctx, opt, txn, fetch, val).await?;
-						}
-						Value::Thing(v) => {
-							// Fetch all remote records
-							let val = Value::Thing(v).get(ctx, opt, txn, &[Part::All]).await?;
-							// Set the value at the path
-							obj.set(ctx, opt, txn, fetch, val).await?;
-						}
-						_ => {
-							// Set the value at the path
-							obj.set(ctx, opt, txn, fetch, val).await?;
-						}
-					}
+					// Fetch the value at the path
+					obj.fetch(ctx, opt, txn, fetch).await?;
 				}
 			}
 		}
 		Ok(())
 	}
 
-	#[cfg(any(target_arch = "wasm32", not(feature = "parallel")))]
-	#[cfg_attr(feature = "parallel", async_recursion)]
-	#[cfg_attr(not(feature = "parallel"), async_recursion(?Send))]
+	#[cfg(target_arch = "wasm32")]
+	#[async_recursion(?Send)]
 	async fn iterate(
 		&mut self,
 		ctx: &Context<'_>,
@@ -339,17 +563,22 @@ impl Iterator {
 		txn: &Transaction,
 		stm: &Statement<'_>,
 	) -> Result<(), Error> {
+		// Prevent deep recursion
+		let opt = &opt.dive(4)?;
+		// If any iterator requires distinct, we new to create a global distinct instance
+		let mut distinct = SyncDistinct::new(ctx);
 		// Process all prepared values
 		for v in mem::take(&mut self.entries) {
-			v.iterate(ctx, opt, txn, stm, self).await?;
+			// Distinct is passed only for iterators that really requires it
+			let dis = SyncDistinct::requires_distinct(ctx, distinct.as_mut(), &v);
+			v.iterate(ctx, opt, txn, stm, self, dis).await?;
 		}
 		// Everything processed ok
 		Ok(())
 	}
 
-	#[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
-	#[cfg_attr(feature = "parallel", async_recursion)]
-	#[cfg_attr(not(feature = "parallel"), async_recursion(?Send))]
+	#[cfg(not(target_arch = "wasm32"))]
+	#[async_recursion]
 	async fn iterate(
 		&mut self,
 		ctx: &Context<'_>,
@@ -357,20 +586,29 @@ impl Iterator {
 		txn: &Transaction,
 		stm: &Statement<'_>,
 	) -> Result<(), Error> {
+		// Prevent deep recursion
+		let opt = &opt.dive(4)?;
+		// Check if iterating in parallel
 		match stm.parallel() {
 			// Run statements sequentially
 			false => {
+				// If any iterator requires distinct, we new to create a global distinct instance
+				let mut distinct = SyncDistinct::new(ctx);
 				// Process all prepared values
 				for v in mem::take(&mut self.entries) {
-					v.iterate(ctx, opt, txn, stm, self).await?;
+					// Distinct is passed only for iterators that really requires it
+					let dis = SyncDistinct::requires_distinct(ctx, distinct.as_mut(), &v);
+					v.iterate(ctx, opt, txn, stm, self, dis).await?;
 				}
 				// Everything processed ok
 				Ok(())
 			}
 			// Run statements in parallel
 			true => {
+				// If any iterator requires distinct, we new to create a global distinct instance
+				let distinct = AsyncDistinct::new(ctx);
 				// Create a new executor
-				let exe = executor::Executor::new();
+				let e = executor::Executor::new();
 				// Take all of the iterator values
 				let vals = mem::take(&mut self.entries);
 				// Create a channel to shutdown
@@ -381,7 +619,9 @@ impl Iterator {
 				let adocs = async {
 					// Process all prepared values
 					for v in vals {
-						exe.spawn(v.channel(ctx, opt, txn, stm, chn.clone()))
+						// Distinct is passed only for iterators that really requires it
+						let dis = AsyncDistinct::requires_distinct(ctx, distinct.as_ref(), &v);
+						e.spawn(v.channel(ctx, opt, txn, stm, chn.clone(), dis))
 							// Ensure we detach the spawned task
 							.detach();
 					}
@@ -393,8 +633,8 @@ impl Iterator {
 				// Create an async closure for received values
 				let avals = async {
 					// Process all received values
-					while let Ok((k, v)) = docs.recv().await {
-						exe.spawn(Document::compute(ctx, opt, txn, stm, chn.clone(), k, v))
+					while let Ok(pro) = docs.recv().await {
+						e.spawn(Document::compute(ctx, opt, txn, stm, chn.clone(), pro))
 							// Ensure we detach the spawned task
 							.detach();
 					}
@@ -411,7 +651,7 @@ impl Iterator {
 					let _ = end.send(()).await;
 				};
 				// Run all executor tasks
-				let fut = exe.run(exit.recv());
+				let fut = e.run(exit.recv());
 				// Wait for all closures
 				let res = futures::join!(adocs, avals, aproc, fut);
 				// Consume executor error
@@ -422,42 +662,22 @@ impl Iterator {
 		}
 	}
 
-	// Process a new record Thing and Value
+	/// Process a new record Thing and Value
 	pub async fn process(
 		&mut self,
 		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		stm: &Statement<'_>,
-		thg: Option<Thing>,
-		val: Operable,
+		pro: Processed,
 	) {
-		// Check current context
-		if ctx.is_done() {
-			return;
-		}
-		// Setup a new workable
-		let val = match val {
-			Operable::Value(v) => (v, Workable::Normal),
-			Operable::Mergeable(v, o) => (v, Workable::Insert(o)),
-			Operable::Relatable(f, v, w) => (v, Workable::Relate(f, w)),
-		};
-		// Setup a new document
-		let mut doc = Document::new(thg, &val.0, val.1);
 		// Process the document
-		let res = match stm {
-			Statement::Select(_) => doc.select(ctx, opt, txn, stm).await,
-			Statement::Create(_) => doc.create(ctx, opt, txn, stm).await,
-			Statement::Update(_) => doc.update(ctx, opt, txn, stm).await,
-			Statement::Relate(_) => doc.relate(ctx, opt, txn, stm).await,
-			Statement::Delete(_) => doc.delete(ctx, opt, txn, stm).await,
-			Statement::Insert(_) => doc.insert(ctx, opt, txn, stm).await,
-		};
+		let res = Document::process(ctx, opt, txn, stm, pro).await;
 		// Process the result
 		self.result(res, stm);
 	}
 
-	// Accept a processed record result
+	/// Accept a processed record result
 	fn result(&mut self, res: Result<Value, Error>, stm: &Statement<'_>) {
 		// Process the result
 		match res {
@@ -473,12 +693,12 @@ impl Iterator {
 		}
 		// Check if we can exit
 		if stm.group().is_none() && stm.order().is_none() {
-			if let Some(l) = stm.limit() {
-				if let Some(s) = stm.start() {
-					if self.results.len() == l.0 + s.0 {
+			if let Some(l) = self.limit {
+				if let Some(s) = self.start {
+					if self.results.len() == l + s {
 						self.run.cancel()
 					}
-				} else if self.results.len() == l.0 {
+				} else if self.results.len() == l {
 					self.run.cancel()
 				}
 			}

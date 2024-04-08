@@ -3,6 +3,7 @@ use crate::sql::data::Data;
 use crate::sql::fetch::Fetchs;
 use crate::sql::field::Fields;
 use crate::sql::group::Groups;
+use crate::sql::idiom::Idioms;
 use crate::sql::limit::Limit;
 use crate::sql::order::Orders;
 use crate::sql::output::Output;
@@ -11,20 +12,36 @@ use crate::sql::start::Start;
 use crate::sql::statements::create::CreateStatement;
 use crate::sql::statements::delete::DeleteStatement;
 use crate::sql::statements::insert::InsertStatement;
+use crate::sql::statements::live::LiveStatement;
 use crate::sql::statements::relate::RelateStatement;
 use crate::sql::statements::select::SelectStatement;
+use crate::sql::statements::show::ShowStatement;
 use crate::sql::statements::update::UpdateStatement;
-use crate::sql::version::Version;
+use crate::sql::Explain;
 use std::fmt;
 
 #[derive(Clone, Debug)]
-pub enum Statement<'a> {
+pub(crate) enum Statement<'a> {
+	Live(&'a LiveStatement),
+	Show(&'a ShowStatement),
 	Select(&'a SelectStatement),
 	Create(&'a CreateStatement),
 	Update(&'a UpdateStatement),
 	Relate(&'a RelateStatement),
 	Delete(&'a DeleteStatement),
 	Insert(&'a InsertStatement),
+}
+
+impl<'a> From<&'a LiveStatement> for Statement<'a> {
+	fn from(v: &'a LiveStatement) -> Self {
+		Statement::Live(v)
+	}
+}
+
+impl<'a> From<&'a ShowStatement> for Statement<'a> {
+	fn from(v: &'a ShowStatement) -> Self {
+		Statement::Show(v)
+	}
 }
 
 impl<'a> From<&'a SelectStatement> for Statement<'a> {
@@ -66,36 +83,47 @@ impl<'a> From<&'a InsertStatement> for Statement<'a> {
 impl<'a> fmt::Display for Statement<'a> {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		match self {
-			Statement::Select(v) => write!(f, "{}", v),
-			Statement::Create(v) => write!(f, "{}", v),
-			Statement::Update(v) => write!(f, "{}", v),
-			Statement::Relate(v) => write!(f, "{}", v),
-			Statement::Delete(v) => write!(f, "{}", v),
-			Statement::Insert(v) => write!(f, "{}", v),
+			Statement::Live(v) => write!(f, "{v}"),
+			Statement::Show(v) => write!(f, "{v}"),
+			Statement::Select(v) => write!(f, "{v}"),
+			Statement::Create(v) => write!(f, "{v}"),
+			Statement::Update(v) => write!(f, "{v}"),
+			Statement::Relate(v) => write!(f, "{v}"),
+			Statement::Delete(v) => write!(f, "{v}"),
+			Statement::Insert(v) => write!(f, "{v}"),
 		}
 	}
 }
 
 impl<'a> Statement<'a> {
-	// Check the type of statement
+	/// Check the type of statement
 	#[inline]
 	pub fn is_select(&self) -> bool {
 		matches!(self, Statement::Select(_))
 	}
-	// Check the type of statement
+	/// Check the type of statement
 	#[inline]
 	pub fn is_delete(&self) -> bool {
 		matches!(self, Statement::Delete(_))
 	}
-	// Returns any query fields if specified
+	/// Returns any query fields if specified
 	#[inline]
 	pub fn expr(&self) -> Option<&Fields> {
 		match self {
 			Statement::Select(v) => Some(&v.expr),
+			Statement::Live(v) => Some(&v.expr),
 			_ => None,
 		}
 	}
-	// Returns any SET clause if specified
+	/// Returns any OMIT clause if specified
+	#[inline]
+	pub fn omit(&self) -> Option<&Idioms> {
+		match self {
+			Statement::Select(v) => v.omit.as_ref(),
+			_ => None,
+		}
+	}
+	/// Returns any SET clause if specified
 	#[inline]
 	pub fn data(&self) -> Option<&Data> {
 		match self {
@@ -106,17 +134,18 @@ impl<'a> Statement<'a> {
 			_ => None,
 		}
 	}
-	// Returns any WHERE clause if specified
+	/// Returns any WHERE clause if specified
 	#[inline]
 	pub fn conds(&self) -> Option<&Cond> {
 		match self {
+			Statement::Live(v) => v.cond.as_ref(),
 			Statement::Select(v) => v.cond.as_ref(),
 			Statement::Update(v) => v.cond.as_ref(),
 			Statement::Delete(v) => v.cond.as_ref(),
 			_ => None,
 		}
 	}
-	// Returns any SPLIT clause if specified
+	/// Returns any SPLIT clause if specified
 	#[inline]
 	pub fn split(&self) -> Option<&Splits> {
 		match self {
@@ -124,7 +153,7 @@ impl<'a> Statement<'a> {
 			_ => None,
 		}
 	}
-	// Returns any GROUP clause if specified
+	/// Returns any GROUP clause if specified
 	#[inline]
 	pub fn group(&self) -> Option<&Groups> {
 		match self {
@@ -132,7 +161,7 @@ impl<'a> Statement<'a> {
 			_ => None,
 		}
 	}
-	// Returns any ORDER clause if specified
+	/// Returns any ORDER clause if specified
 	#[inline]
 	pub fn order(&self) -> Option<&Orders> {
 		match self {
@@ -140,7 +169,7 @@ impl<'a> Statement<'a> {
 			_ => None,
 		}
 	}
-	// Returns any FETCH clause if specified
+	/// Returns any FETCH clause if specified
 	#[inline]
 	pub fn fetch(&self) -> Option<&Fetchs> {
 		match self {
@@ -148,7 +177,7 @@ impl<'a> Statement<'a> {
 			_ => None,
 		}
 	}
-	// Returns any START clause if specified
+	/// Returns any START clause if specified
 	#[inline]
 	pub fn start(&self) -> Option<&Start> {
 		match self {
@@ -156,7 +185,7 @@ impl<'a> Statement<'a> {
 			_ => None,
 		}
 	}
-	// Returns any LIMIT clause if specified
+	/// Returns any LIMIT clause if specified
 	#[inline]
 	pub fn limit(&self) -> Option<&Limit> {
 		match self {
@@ -164,15 +193,7 @@ impl<'a> Statement<'a> {
 			_ => None,
 		}
 	}
-	// Returns any VERSION clause if specified
-	#[inline]
-	pub fn version(&self) -> Option<&Version> {
-		match self {
-			Statement::Select(v) => v.version.as_ref(),
-			_ => None,
-		}
-	}
-	// Returns any RETURN clause if specified
+	/// Returns any RETURN clause if specified
 	#[inline]
 	pub fn output(&self) -> Option<&Output> {
 		match self {
@@ -184,8 +205,9 @@ impl<'a> Statement<'a> {
 			_ => None,
 		}
 	}
-	// Returns any RETURN clause if specified
+	/// Returns any PARALLEL clause if specified
 	#[inline]
+	#[allow(dead_code)]
 	pub fn parallel(&self) -> bool {
 		match self {
 			Statement::Select(v) => v.parallel,
@@ -194,6 +216,15 @@ impl<'a> Statement<'a> {
 			Statement::Relate(v) => v.parallel,
 			Statement::Delete(v) => v.parallel,
 			Statement::Insert(v) => v.parallel,
+			_ => false,
+		}
+	}
+	/// Returns any EXPLAIN clause if specified
+	#[inline]
+	pub fn explain(&self) -> Option<&Explain> {
+		match self {
+			Statement::Select(v) => v.explain.as_ref(),
+			_ => None,
 		}
 	}
 }

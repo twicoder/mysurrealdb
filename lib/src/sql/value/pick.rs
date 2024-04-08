@@ -3,20 +3,25 @@ use crate::sql::part::Part;
 use crate::sql::value::Value;
 
 impl Value {
+	/// Synchronous method for getting a field from a `Value`
 	pub fn pick(&self, path: &[Part]) -> Self {
 		match path.first() {
-			// Get the current path part
+			// Get the current value at path
 			Some(p) => match self {
-				// Current path part is an object
+				// Current value at path is an object
 				Value::Object(v) => match p {
 					Part::Field(f) => match v.get(f as &str) {
+						Some(v) => v.pick(path.next()),
+						None => Value::None,
+					},
+					Part::Index(i) => match v.get(&i.to_string()) {
 						Some(v) => v.pick(path.next()),
 						None => Value::None,
 					},
 					Part::All => self.pick(path.next()),
 					_ => Value::None,
 				},
-				// Current path part is an array
+				// Current value at path is an array
 				Value::Array(v) => match p {
 					Part::All => v.iter().map(|v| v.pick(path.next())).collect::<Vec<_>>().into(),
 					Part::First => match v.first() {

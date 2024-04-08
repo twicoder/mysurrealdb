@@ -1,17 +1,40 @@
+use crate::cli::abstraction::OptionalDatabaseConnectionArguments;
+use crate::env::release;
 use crate::err::Error;
+use clap::Args;
+use surrealdb::engine::any::connect;
 
-const NAME: &str = env!("CARGO_PKG_NAME");
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-macro_rules! get_cfg {
-	($i:ident : $($s:expr),+) => (
-		let $i = || { $( if cfg!($i=$s) { return $s; } );+ "unknown"};
-	)
+#[derive(Args, Debug)]
+pub struct VersionCommandArguments {
+	#[command(flatten)]
+	conn: OptionalDatabaseConnectionArguments,
 }
 
-pub fn init(_: &clap::ArgMatches) -> Result<(), Error> {
-	get_cfg!(target_os: "windows", "macos", "ios", "linux", "android", "freebsd", "openbsd", "netbsd");
-	get_cfg!(target_arch: "x86", "x86_64", "mips", "powerpc", "powerpc64", "arm", "aarch64");
-	println!("{} {} for {} on {}", NAME, VERSION, target_os(), target_arch());
+pub async fn init(
+	VersionCommandArguments {
+		conn: OptionalDatabaseConnectionArguments {
+			endpoint,
+		},
+	}: VersionCommandArguments,
+) -> Result<(), Error> {
+	// Initialize opentelemetry and logging
+	crate::telemetry::builder().with_log_level("error").init();
+	// Print server version if endpoint supplied else CLI version
+	if let Some(e) = endpoint {
+		// Print remote server version
+		println!("{}", get_server_version_string(e).await?);
+	} else {
+		// Print local CLI version
+		println!("{}", release());
+	}
 	Ok(())
+}
+
+async fn get_server_version_string(endpoint: String) -> Result<String, Error> {
+	// Connect to the database engine
+	let client = connect(endpoint).await?;
+	// Query database version info
+	let server_version = client.version().await?;
+	// Convert version info to formatted string
+	Ok(server_version.to_string())
 }

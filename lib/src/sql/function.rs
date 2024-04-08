@@ -1,27 +1,45 @@
 use crate::ctx::Context;
-use crate::dbs::Options;
-use crate::dbs::Transaction;
+use crate::dbs::{Options, Transaction};
+use crate::doc::CursorDoc;
 use crate::err::Error;
 use crate::fnc;
+use crate::iam::Action;
 use crate::sql::comment::mightbespace;
-use crate::sql::common::commas;
+use crate::sql::common::val_char;
+use crate::sql::common::{commas, openparentheses};
 use crate::sql::error::IResult;
+use crate::sql::fmt::Fmt;
+use crate::sql::idiom::Idiom;
 use crate::sql::script::{script as func, Script};
-use crate::sql::value::{single, value, Value};
+use crate::sql::value::{value, Value};
+use crate::sql::Permission;
+use async_recursion::async_recursion;
+use futures::future::try_join_all;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
+use nom::bytes::complete::take_while1;
 use nom::character::complete::char;
-use nom::multi::separated_list0;
+use nom::combinator::{cut, recognize};
+use nom::multi::separated_list1;
+use nom::sequence::terminated;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+use super::error::expected;
+use super::util::delimited_list0;
+
+pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Function";
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
+#[serde(rename = "$surrealdb::private::sql::Function")]
+#[revisioned(revision = 1)]
 pub enum Function {
-	Future(Value),
-	Cast(String, Value),
 	Normal(String, Vec<Value>),
+	Custom(String, Vec<Value>),
 	Script(Script, Vec<Value>),
+	// Add new variants here
 }
 
 impl PartialOrd for Function {
@@ -32,17 +50,34 @@ impl PartialOrd for Function {
 }
 
 impl Function {
-	// Get function arguments if applicable
+	/// Get function name if applicable
+	pub fn name(&self) -> Option<&str> {
+		match self {
+			Self::Normal(n, _) => Some(n.as_str()),
+			Self::Custom(n, _) => Some(n.as_str()),
+			_ => None,
+		}
+	}
+	/// Get function arguments if applicable
 	pub fn args(&self) -> &[Value] {
 		match self {
-			Function::Normal(_, a) => a,
+			Self::Normal(_, a) => a,
+			Self::Custom(_, a) => a,
 			_ => &[],
 		}
 	}
-	// Convert this function to an aggregate
-	pub fn aggregate(&self, val: Value) -> Function {
+	/// Convert function call to a field name
+	pub fn to_idiom(&self) -> Idiom {
 		match self {
-			Function::Normal(n, a) => {
+			Self::Script(_, _) => "function".to_string().into(),
+			Self::Normal(f, _) => f.to_owned().into(),
+			Self::Custom(f, _) => format!("fn::{f}").into(),
+		}
+	}
+	/// Convert this function to an aggregate
+	pub fn aggregate(&self, val: Value) -> Self {
+		match self {
+			Self::Normal(n, a) => {
 				let mut a = a.to_owned();
 				match a.len() {
 					0 => a.insert(0, val),
@@ -51,92 +86,152 @@ impl Function {
 						a.insert(0, val);
 					}
 				}
-				Function::Normal(n.to_owned(), a)
+				Self::Normal(n.to_owned(), a)
 			}
 			_ => unreachable!(),
 		}
 	}
-	// Check if this function is a rolling function
+	/// Check if this function is a custom function
+	pub fn is_custom(&self) -> bool {
+		matches!(self, Self::Custom(_, _))
+	}
+
+	/// Check if this function is a scripting function
+	pub fn is_script(&self) -> bool {
+		matches!(self, Self::Script(_, _))
+	}
+
+	/// Check if this function is a rolling function
 	pub fn is_rolling(&self) -> bool {
 		match self {
-			Function::Normal(f, _) if f == "array::concat" => true,
-			Function::Normal(f, _) if f == "array::distinct" => true,
-			Function::Normal(f, _) if f == "array::union" => true,
-			Function::Normal(f, _) if f == "count" => true,
-			Function::Normal(f, _) if f == "math::max" => true,
-			Function::Normal(f, _) if f == "math::mean" => true,
-			Function::Normal(f, _) if f == "math::min" => true,
-			Function::Normal(f, _) if f == "math::stddev" => true,
-			Function::Normal(f, _) if f == "math::sum" => true,
-			Function::Normal(f, _) if f == "math::variance" => true,
+			Self::Normal(f, _) if f == "count" => true,
+			Self::Normal(f, _) if f == "math::max" => true,
+			Self::Normal(f, _) if f == "math::mean" => true,
+			Self::Normal(f, _) if f == "math::min" => true,
+			Self::Normal(f, _) if f == "math::sum" => true,
+			Self::Normal(f, _) if f == "time::max" => true,
+			Self::Normal(f, _) if f == "time::min" => true,
 			_ => false,
 		}
 	}
-	// Check if this function is a grouping function
+	/// Check if this function is a grouping function
 	pub fn is_aggregate(&self) -> bool {
 		match self {
-			Function::Normal(f, _) if f == "array::concat" => true,
-			Function::Normal(f, _) if f == "array::distinct" => true,
-			Function::Normal(f, _) if f == "array::union" => true,
-			Function::Normal(f, _) if f == "count" => true,
-			Function::Normal(f, _) if f == "math::bottom" => true,
-			Function::Normal(f, _) if f == "math::interquartile" => true,
-			Function::Normal(f, _) if f == "math::max" => true,
-			Function::Normal(f, _) if f == "math::mean" => true,
-			Function::Normal(f, _) if f == "math::median" => true,
-			Function::Normal(f, _) if f == "math::midhinge" => true,
-			Function::Normal(f, _) if f == "math::min" => true,
-			Function::Normal(f, _) if f == "math::mode" => true,
-			Function::Normal(f, _) if f == "math::nearestrank" => true,
-			Function::Normal(f, _) if f == "math::percentile" => true,
-			Function::Normal(f, _) if f == "math::sample" => true,
-			Function::Normal(f, _) if f == "math::spread" => true,
-			Function::Normal(f, _) if f == "math::stddev" => true,
-			Function::Normal(f, _) if f == "math::sum" => true,
-			Function::Normal(f, _) if f == "math::top" => true,
-			Function::Normal(f, _) if f == "math::trimean" => true,
-			Function::Normal(f, _) if f == "math::variance" => true,
+			Self::Normal(f, _) if f == "array::distinct" => true,
+			Self::Normal(f, _) if f == "array::first" => true,
+			Self::Normal(f, _) if f == "array::group" => true,
+			Self::Normal(f, _) if f == "array::last" => true,
+			Self::Normal(f, _) if f == "count" => true,
+			Self::Normal(f, _) if f == "math::bottom" => true,
+			Self::Normal(f, _) if f == "math::interquartile" => true,
+			Self::Normal(f, _) if f == "math::max" => true,
+			Self::Normal(f, _) if f == "math::mean" => true,
+			Self::Normal(f, _) if f == "math::median" => true,
+			Self::Normal(f, _) if f == "math::midhinge" => true,
+			Self::Normal(f, _) if f == "math::min" => true,
+			Self::Normal(f, _) if f == "math::mode" => true,
+			Self::Normal(f, _) if f == "math::nearestrank" => true,
+			Self::Normal(f, _) if f == "math::percentile" => true,
+			Self::Normal(f, _) if f == "math::sample" => true,
+			Self::Normal(f, _) if f == "math::spread" => true,
+			Self::Normal(f, _) if f == "math::stddev" => true,
+			Self::Normal(f, _) if f == "math::sum" => true,
+			Self::Normal(f, _) if f == "math::top" => true,
+			Self::Normal(f, _) if f == "math::trimean" => true,
+			Self::Normal(f, _) if f == "math::variance" => true,
+			Self::Normal(f, _) if f == "time::max" => true,
+			Self::Normal(f, _) if f == "time::min" => true,
 			_ => false,
 		}
 	}
 }
 
 impl Function {
+	/// Process this type returning a computed simple Value
+	#[cfg_attr(not(target_arch = "wasm32"), async_recursion)]
+	#[cfg_attr(target_arch = "wasm32", async_recursion(?Send))]
 	pub(crate) async fn compute(
 		&self,
 		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
-		doc: Option<&Value>,
+		doc: Option<&'async_recursion CursorDoc<'_>>,
 	) -> Result<Value, Error> {
+		// Ensure futures are run
+		let opt = &opt.new_with_futures(true);
+		// Process the function type
 		match self {
-			Function::Future(v) => match opt.futures {
-				true => {
-					let v = v.compute(ctx, opt, txn, doc).await?;
-					fnc::future::run(ctx, v)
-				}
-				false => Ok(self.to_owned().into()),
-			},
-			Function::Cast(s, x) => {
-				let v = x.compute(ctx, opt, txn, doc).await?;
-				fnc::cast::run(ctx, s, v)
+			Self::Normal(s, x) => {
+				// Check this function is allowed
+				ctx.check_allowed_function(s)?;
+				// Compute the function arguments
+				let a = try_join_all(x.iter().map(|v| v.compute(ctx, opt, txn, doc))).await?;
+				// Run the normal function
+				fnc::run(ctx, opt, txn, doc, s, a).await
 			}
-			Function::Normal(s, x) => {
-				let mut a: Vec<Value> = Vec::with_capacity(x.len());
-				for v in x {
-					a.push(v.compute(ctx, opt, txn, doc).await?);
+			Self::Custom(s, x) => {
+				// Check this function is allowed
+				ctx.check_allowed_function(format!("fn::{s}").as_str())?;
+				// Get the function definition
+				let val = {
+					// Claim transaction
+					let mut run = txn.lock().await;
+					// Get the function definition
+					run.get_and_cache_db_function(opt.ns(), opt.db(), s).await?
+				};
+				// Check permissions
+				if opt.check_perms(Action::View) {
+					match &val.permissions {
+						Permission::Full => (),
+						Permission::None => {
+							return Err(Error::FunctionPermissions {
+								name: s.to_owned(),
+							})
+						}
+						Permission::Specific(e) => {
+							// Disable permissions
+							let opt = &opt.new_with_perms(false);
+							// Process the PERMISSION clause
+							if !e.compute(ctx, opt, txn, doc).await?.is_truthy() {
+								return Err(Error::FunctionPermissions {
+									name: s.to_owned(),
+								});
+							}
+						}
+					}
 				}
-				fnc::run(ctx, s, a).await
+				// Return the value
+				// Check the function arguments
+				if x.len() != val.args.len() {
+					return Err(Error::InvalidArguments {
+						name: format!("fn::{}", val.name),
+						message: match val.args.len() {
+							1 => String::from("The function expects 1 argument."),
+							l => format!("The function expects {l} arguments."),
+						},
+					});
+				}
+				// Compute the function arguments
+				let a = try_join_all(x.iter().map(|v| v.compute(ctx, opt, txn, doc))).await?;
+				// Duplicate context
+				let mut ctx = Context::new(ctx);
+				// Process the function arguments
+				for (val, (name, kind)) in a.into_iter().zip(&val.args) {
+					ctx.add_value(name.to_raw(), val.coerce_to(kind)?);
+				}
+				// Run the custom function
+				val.block.compute(&ctx, opt, txn, doc).await
 			}
 			#[allow(unused_variables)]
-			Function::Script(s, x) => {
+			Self::Script(s, x) => {
 				#[cfg(feature = "scripting")]
 				{
-					let mut a: Vec<Value> = Vec::with_capacity(x.len());
-					for v in x {
-						a.push(v.compute(ctx, opt, txn, doc).await?);
-					}
-					fnc::script::run(ctx, s, a, doc).await
+					// Check if scripting is allowed
+					ctx.check_allowed_scripting()?;
+					// Compute the function arguments
+					let a = try_join_all(x.iter().map(|v| v.compute(ctx, opt, txn, doc))).await?;
+					// Run the script function
+					fnc::script::run(ctx, opt, txn, doc, s, a).await
 				}
 				#[cfg(not(feature = "scripting"))]
 				{
@@ -152,318 +247,101 @@ impl Function {
 impl fmt::Display for Function {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		match self {
-			Function::Future(ref e) => write!(f, "fn::future -> {{ {} }}", e),
-			Function::Cast(ref s, ref e) => write!(f, "<{}> {}", s, e),
-			Function::Script(ref s, ref e) => write!(
-				f,
-				"fn::script -> ({}) => {{{}}}",
-				e.iter().map(|ref v| format!("{}", v)).collect::<Vec<_>>().join(", "),
-				s,
-			),
-			Function::Normal(ref s, ref e) => write!(
-				f,
-				"{}({})",
-				s,
-				e.iter().map(|ref v| format!("{}", v)).collect::<Vec<_>>().join(", ")
-			),
+			Self::Normal(s, e) => write!(f, "{s}({})", Fmt::comma_separated(e)),
+			Self::Custom(s, e) => write!(f, "fn::{s}({})", Fmt::comma_separated(e)),
+			Self::Script(s, e) => write!(f, "function({}) {{{s}}}", Fmt::comma_separated(e)),
 		}
 	}
 }
 
-pub fn function(i: &str) -> IResult<&str, Function> {
-	alt((future, normal, script, cast))(i)
+pub fn defined_function(i: &str) -> IResult<&str, Function> {
+	alt((custom, script))(i)
 }
 
-fn future(i: &str) -> IResult<&str, Function> {
-	let (i, _) = tag("fn::future")(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, _) = char('-')(i)?;
-	let (i, _) = char('>')(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, _) = char('{')(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, v) = value(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, _) = char('}')(i)?;
-	Ok((i, Function::Future(v)))
+pub fn builtin_function<'a>(name: &'a str, i: &'a str) -> IResult<&'a str, Function> {
+	let (i, a) = expected(
+		"function arguments",
+		delimited_list0(openparentheses, commas, terminated(cut(value), mightbespace), char(')')),
+	)(i)?;
+	Ok((i, Function::Normal(name.to_string(), a)))
 }
 
-fn normal(i: &str) -> IResult<&str, Function> {
-	let (i, s) = function_names(i)?;
-	let (i, _) = char('(')(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, a) = separated_list0(commas, value)(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, _) = char(')')(i)?;
-	Ok((i, Function::Normal(s.to_string(), a)))
+pub fn custom(i: &str) -> IResult<&str, Function> {
+	let (i, _) = tag("fn::")(i)?;
+	cut(|i| {
+		let (i, s) = recognize(separated_list1(tag("::"), take_while1(val_char)))(i)?;
+		let (i, _) = mightbespace(i)?;
+		let (i, a) = expected(
+			"function arguments",
+			delimited_list0(
+				cut(openparentheses),
+				commas,
+				terminated(cut(value), mightbespace),
+				char(')'),
+			),
+		)(i)?;
+		Ok((i, Function::Custom(s.to_string(), a)))
+	})(i)
 }
 
 fn script(i: &str) -> IResult<&str, Function> {
-	let (i, _) = tag("fn::script")(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, _) = char('-')(i)?;
-	let (i, _) = char('>')(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, _) = tag("(")(i)?;
-	let (i, a) = separated_list0(commas, value)(i)?;
-	let (i, _) = tag(")")(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, _) = tag("=>")(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, _) = char('{')(i)?;
-	let (i, v) = func(i)?;
-	let (i, _) = char('}')(i)?;
-	Ok((i, Function::Script(v, a)))
-}
-
-fn cast(i: &str) -> IResult<&str, Function> {
-	let (i, _) = char('<')(i)?;
-	let (i, s) = function_casts(i)?;
-	let (i, _) = char('>')(i)?;
-	let (i, _) = mightbespace(i)?;
-	let (i, v) = single(i)?;
-	Ok((i, Function::Cast(s.to_string(), v)))
-}
-
-fn function_casts(i: &str) -> IResult<&str, &str> {
-	alt((
-		tag("bool"),
-		tag("int"),
-		tag("float"),
-		tag("string"),
-		tag("number"),
-		tag("decimal"),
-		tag("datetime"),
-		tag("duration"),
-	))(i)
-}
-
-fn function_names(i: &str) -> IResult<&str, &str> {
-	alt((
-		function_array,
-		function_count,
-		function_crypto,
-		function_geo,
-		function_http,
-		function_is,
-		function_math,
-		function_parse,
-		function_rand,
-		function_string,
-		function_time,
-		function_type,
-	))(i)
-}
-
-fn function_array(i: &str) -> IResult<&str, &str> {
-	alt((
-		tag("array::combine"),
-		tag("array::concat"),
-		tag("array::difference"),
-		tag("array::distinct"),
-		tag("array::intersect"),
-		tag("array::len"),
-		tag("array::union"),
-	))(i)
-}
-
-fn function_count(i: &str) -> IResult<&str, &str> {
-	tag("count")(i)
-}
-
-fn function_crypto(i: &str) -> IResult<&str, &str> {
-	alt((
-		tag("crypto::md5"),
-		tag("crypto::sha1"),
-		tag("crypto::sha256"),
-		tag("crypto::sha512"),
-		tag("crypto::argon2::compare"),
-		tag("crypto::argon2::generate"),
-		tag("crypto::pbkdf2::compare"),
-		tag("crypto::pbkdf2::generate"),
-		tag("crypto::scrypt::compare"),
-		tag("crypto::scrypt::generate"),
-	))(i)
-}
-
-fn function_geo(i: &str) -> IResult<&str, &str> {
-	alt((
-		tag("geo::area"),
-		tag("geo::bearing"),
-		tag("geo::centroid"),
-		tag("geo::distance"),
-		tag("geo::hash::decode"),
-		tag("geo::hash::encode"),
-	))(i)
-}
-
-fn function_http(i: &str) -> IResult<&str, &str> {
-	alt((
-		tag("http::head"),
-		tag("http::get"),
-		tag("http::put"),
-		tag("http::post"),
-		tag("http::patch"),
-		tag("http::delete"),
-	))(i)
-}
-
-fn function_is(i: &str) -> IResult<&str, &str> {
-	alt((
-		tag("is::alphanum"),
-		tag("is::alpha"),
-		tag("is::ascii"),
-		tag("is::domain"),
-		tag("is::email"),
-		tag("is::hexadecimal"),
-		tag("is::latitude"),
-		tag("is::longitude"),
-		tag("is::numeric"),
-		tag("is::semver"),
-		tag("is::uuid"),
-	))(i)
-}
-
-fn function_math(i: &str) -> IResult<&str, &str> {
-	alt((
-		alt((
-			tag("math::abs"),
-			tag("math::bottom"),
-			tag("math::ceil"),
-			tag("math::fixed"),
-			tag("math::floor"),
-			tag("math::interquartile"),
-		)),
-		alt((
-			tag("math::max"),
-			tag("math::mean"),
-			tag("math::median"),
-			tag("math::midhinge"),
-			tag("math::min"),
-			tag("math::mode"),
-		)),
-		alt((
-			tag("math::nearestrank"),
-			tag("math::percentile"),
-			tag("math::product"),
-			tag("math::round"),
-			tag("math::spread"),
-			tag("math::sqrt"),
-			tag("math::stddev"),
-			tag("math::sum"),
-			tag("math::top"),
-			tag("math::trimean"),
-			tag("math::variance"),
-		)),
-	))(i)
-}
-
-fn function_parse(i: &str) -> IResult<&str, &str> {
-	alt((
-		tag("parse::email::domain"),
-		tag("parse::email::user"),
-		tag("parse::url::domain"),
-		tag("parse::url::fragment"),
-		tag("parse::url::host"),
-		tag("parse::url::port"),
-		tag("parse::url::path"),
-		tag("parse::url::query"),
-	))(i)
-}
-
-fn function_rand(i: &str) -> IResult<&str, &str> {
-	alt((
-		tag("rand::bool"),
-		tag("rand::enum"),
-		tag("rand::float"),
-		tag("rand::guid"),
-		tag("rand::int"),
-		tag("rand::string"),
-		tag("rand::time"),
-		tag("rand::uuid"),
-		tag("rand"),
-	))(i)
-}
-
-fn function_string(i: &str) -> IResult<&str, &str> {
-	alt((
-		tag("string::concat"),
-		tag("string::endsWith"),
-		tag("string::join"),
-		tag("string::length"),
-		tag("string::lowercase"),
-		tag("string::repeat"),
-		tag("string::replace"),
-		tag("string::reverse"),
-		tag("string::slice"),
-		tag("string::slug"),
-		tag("string::split"),
-		tag("string::startsWith"),
-		tag("string::trim"),
-		tag("string::uppercase"),
-		tag("string::words"),
-	))(i)
-}
-
-fn function_time(i: &str) -> IResult<&str, &str> {
-	alt((
-		tag("time::day"),
-		tag("time::floor"),
-		tag("time::group"),
-		tag("time::hour"),
-		tag("time::mins"),
-		tag("time::month"),
-		tag("time::nano"),
-		tag("time::now"),
-		tag("time::round"),
-		tag("time::secs"),
-		tag("time::unix"),
-		tag("time::wday"),
-		tag("time::week"),
-		tag("time::yday"),
-		tag("time::year"),
-	))(i)
-}
-
-fn function_type(i: &str) -> IResult<&str, &str> {
-	alt((
-		tag("type::bool"),
-		tag("type::datetime"),
-		tag("type::decimal"),
-		tag("type::duration"),
-		tag("type::float"),
-		tag("type::int"),
-		tag("type::number"),
-		tag("type::point"),
-		tag("type::regex"),
-		tag("type::string"),
-		tag("type::table"),
-		tag("type::thing"),
-	))(i)
+	let (i, _) = tag("function")(i)?;
+	cut(|i| {
+		let (i, _) = mightbespace(i)?;
+		let (i, a) = delimited_list0(
+			openparentheses,
+			commas,
+			terminated(cut(value), mightbespace),
+			char(')'),
+		)(i)?;
+		let (i, _) = mightbespace(i)?;
+		let (i, _) = char('{')(i)?;
+		let (i, v) = func(i)?;
+		let (i, _) = char('}')(i)?;
+		Ok((i, Function::Script(v, a)))
+	})(i)
 }
 
 #[cfg(test)]
 mod tests {
-
 	use super::*;
-	use crate::sql::expression::Expression;
-	use crate::sql::test::Parse;
+	use crate::sql::{
+		builtin::{builtin_name, BuiltinName},
+		test::Parse,
+	};
+
+	fn function(i: &str) -> IResult<&str, Function> {
+		alt((defined_function, |i| {
+			let (i, name) = builtin_name(i)?;
+			let BuiltinName::Function(x) = name else {
+				panic!("not a function")
+			};
+			builtin_function(x, i)
+		}))(i)
+	}
 
 	#[test]
 	fn function_single() {
 		let sql = "count()";
 		let res = function(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("count()", format!("{}", out));
 		assert_eq!(out, Function::Normal(String::from("count"), vec![]));
 	}
 
 	#[test]
+	fn function_single_not() {
+		let sql = "not(10)";
+		let res = function(sql);
+		let out = res.unwrap().1;
+		assert_eq!("not(10)", format!("{}", out));
+		assert_eq!(out, Function::Normal("not".to_owned(), vec![10.into()]));
+	}
+
+	#[test]
 	fn function_module() {
 		let sql = "rand::uuid()";
 		let res = function(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("rand::uuid()", format!("{}", out));
 		assert_eq!(out, Function::Normal(String::from("rand::uuid"), vec![]));
@@ -471,52 +349,38 @@ mod tests {
 
 	#[test]
 	fn function_arguments() {
-		let sql = "is::numeric(null)";
+		let sql = "string::is::numeric(null)";
 		let res = function(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
-		assert_eq!("is::numeric(NULL)", format!("{}", out));
-		assert_eq!(out, Function::Normal(String::from("is::numeric"), vec![Value::Null]));
+		assert_eq!("string::is::numeric(NULL)", format!("{}", out));
+		assert_eq!(out, Function::Normal(String::from("string::is::numeric"), vec![Value::Null]));
 	}
 
 	#[test]
-	fn function_casting_number() {
-		let sql = "<int>1.2345";
+	fn function_simple_together() {
+		let sql = "function() { return 'test'; }";
 		let res = function(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
-		assert_eq!("<int> 1.2345", format!("{}", out));
-		assert_eq!(out, Function::Cast(String::from("int"), 1.2345.into()));
+		assert_eq!("function() { return 'test'; }", format!("{}", out));
+		assert_eq!(out, Function::Script(Script::parse(" return 'test'; "), vec![]));
 	}
 
 	#[test]
-	fn function_casting_string() {
-		let sql = "<string>1.2345";
+	fn function_simple_whitespace() {
+		let sql = "function () { return 'test'; }";
 		let res = function(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
-		assert_eq!("<string> 1.2345", format!("{}", out));
-		assert_eq!(out, Function::Cast(String::from("string"), 1.2345.into()));
-	}
-
-	#[test]
-	fn function_future_expression() {
-		let sql = "fn::future -> { 1.2345 + 5.4321 }";
-		let res = function(sql);
-		assert!(res.is_ok());
-		let out = res.unwrap().1;
-		assert_eq!("fn::future -> { 1.2345 + 5.4321 }", format!("{}", out));
-		assert_eq!(out, Function::Future(Value::from(Expression::parse("1.2345 + 5.4321"))));
+		assert_eq!("function() { return 'test'; }", format!("{}", out));
+		assert_eq!(out, Function::Script(Script::parse(" return 'test'; "), vec![]));
 	}
 
 	#[test]
 	fn function_script_expression() {
-		let sql = "fn::script -> () => { return this.tags.filter(t => { return t.length > 3; }); }";
+		let sql = "function() { return this.tags.filter(t => { return t.length > 3; }); }";
 		let res = function(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(
-			"fn::script -> () => { return this.tags.filter(t => { return t.length > 3; }); }",
+			"function() { return this.tags.filter(t => { return t.length > 3; }); }",
 			format!("{}", out)
 		);
 		assert_eq!(

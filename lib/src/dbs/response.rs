@@ -1,16 +1,29 @@
 use crate::err::Error;
 use crate::sql::value::Value;
-use crate::sql::Object;
 use serde::ser::SerializeStruct;
+use serde::Deserialize;
 use serde::Serialize;
 use std::time::Duration;
+
+pub(crate) const TOKEN: &str = "$surrealdb::private::sql::Response";
+
+#[derive(Debug)]
+pub enum QueryType {
+	// Any kind of query
+	Other,
+	// Indicates that the response live query id must be tracked
+	Live,
+	// Indicates that the live query should be removed from tracking
+	Kill,
+}
 
 /// The return value when running a query set on the database.
 #[derive(Debug)]
 pub struct Response {
-	pub sql: Option<String>,
 	pub time: Duration,
 	pub result: Result<Value, Error>,
+	// Record the query type in case processing the response is necessary (such as tracking live queries).
+	pub query_type: QueryType,
 }
 
 impl Response {
@@ -18,51 +31,17 @@ impl Response {
 	pub fn speed(&self) -> String {
 		format!("{:?}", self.time)
 	}
-	/// Retrieve the response as a result by reference
-	pub fn output(&self) -> Result<&Value, &Error> {
-		match &self.result {
-			Ok(v) => Ok(v),
-			Err(e) => Err(e),
-		}
+	/// Retrieve the response as a normal result
+	pub fn output(self) -> Result<Value, Error> {
+		self.result
 	}
 }
 
-impl From<Response> for Value {
-	fn from(v: Response) -> Value {
-		// Get the response speed
-		let time = v.speed();
-		// Get the response status
-		let status = v.output().map_or_else(|_| "ERR", |_| "OK");
-		// Convert the response
-		match v.result {
-			Ok(val) => match v.sql {
-				Some(sql) => Value::Object(Object(map! {
-					String::from("sql") => sql.into(),
-					String::from("time") => time.into(),
-					String::from("status") => status.into(),
-					String::from("result") => val,
-				})),
-				None => Value::Object(Object(map! {
-					String::from("time") => time.into(),
-					String::from("status") => status.into(),
-					String::from("result") => val,
-				})),
-			},
-			Err(err) => match v.sql {
-				Some(sql) => Value::Object(Object(map! {
-					String::from("sql") => sql.into(),
-					String::from("time") => time.into(),
-					String::from("status") => status.into(),
-					String::from("detail") => err.to_string().into(),
-				})),
-				None => Value::Object(Object(map! {
-					String::from("time") => time.into(),
-					String::from("status") => status.into(),
-					String::from("detail") => err.to_string().into(),
-				})),
-			},
-		}
-	}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub(crate) enum Status {
+	Ok,
+	Err,
 }
 
 impl Serialize for Response {
@@ -70,41 +49,18 @@ impl Serialize for Response {
 	where
 		S: serde::Serializer,
 	{
+		let mut val = serializer.serialize_struct(TOKEN, 3)?;
+		val.serialize_field("time", self.speed().as_str())?;
 		match &self.result {
-			Ok(v) => match &self.sql {
-				Some(s) => {
-					let mut val = serializer.serialize_struct("Response", 4)?;
-					val.serialize_field("sql", s.as_str())?;
-					val.serialize_field("time", self.speed().as_str())?;
-					val.serialize_field("status", "OK")?;
-					val.serialize_field("result", v)?;
-					val.end()
-				}
-				None => {
-					let mut val = serializer.serialize_struct("Response", 3)?;
-					val.serialize_field("time", self.speed().as_str())?;
-					val.serialize_field("status", "OK")?;
-					val.serialize_field("result", v)?;
-					val.end()
-				}
-			},
-			Err(e) => match &self.sql {
-				Some(s) => {
-					let mut val = serializer.serialize_struct("Response", 4)?;
-					val.serialize_field("sql", s.as_str())?;
-					val.serialize_field("time", self.speed().as_str())?;
-					val.serialize_field("status", "ERR")?;
-					val.serialize_field("detail", e)?;
-					val.end()
-				}
-				None => {
-					let mut val = serializer.serialize_struct("Response", 3)?;
-					val.serialize_field("time", self.speed().as_str())?;
-					val.serialize_field("status", "ERR")?;
-					val.serialize_field("detail", e)?;
-					val.end()
-				}
-			},
+			Ok(v) => {
+				val.serialize_field("status", &Status::Ok)?;
+				val.serialize_field("result", v)?;
+			}
+			Err(e) => {
+				val.serialize_field("status", &Status::Err)?;
+				val.serialize_field("result", &Value::from(e.to_string()))?;
+			}
 		}
+		val.end()
 	}
 }

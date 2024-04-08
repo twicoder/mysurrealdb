@@ -1,19 +1,19 @@
 use crate::ctx::Context;
-use crate::dbs::Options;
-use crate::dbs::Transaction;
+use crate::dbs::{Options, Transaction};
 use crate::err::Error;
+use crate::exe::try_join_all_buffered;
 use crate::sql::array::Abolish;
 use crate::sql::part::Next;
 use crate::sql::part::Part;
 use crate::sql::value::Value;
 use async_recursion::async_recursion;
-use futures::future::try_join_all;
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 impl Value {
-	#[cfg_attr(feature = "parallel", async_recursion)]
-	#[cfg_attr(not(feature = "parallel"), async_recursion(?Send))]
-	pub async fn del(
+	/// Asynchronous method for deleting a field from a `Value`
+	#[cfg_attr(not(target_arch = "wasm32"), async_recursion)]
+	#[cfg_attr(target_arch = "wasm32", async_recursion(?Send))]
+	pub(crate) async fn del(
 		&mut self,
 		ctx: &Context<'_>,
 		opt: &Options,
@@ -21,23 +21,46 @@ impl Value {
 		path: &[Part],
 	) -> Result<(), Error> {
 		match path.first() {
-			// Get the current path part
+			// Get the current value at path
 			Some(p) => match self {
-				// Current path part is an object
+				// Current value at path is an object
 				Value::Object(v) => match p {
 					Part::Field(f) => match path.len() {
 						1 => {
-							v.remove(f as &str);
+							v.remove(f.as_str());
 							Ok(())
 						}
-						_ => match v.get_mut(f as &str) {
+						_ => match v.get_mut(f.as_str()) {
 							Some(v) if v.is_some() => v.del(ctx, opt, txn, path.next()).await,
 							_ => Ok(()),
 						},
 					},
+					Part::Index(i) => match path.len() {
+						1 => {
+							v.remove(&i.to_string());
+							Ok(())
+						}
+						_ => match v.get_mut(&i.to_string()) {
+							Some(v) if v.is_some() => v.del(ctx, opt, txn, path.next()).await,
+							_ => Ok(()),
+						},
+					},
+					Part::Value(x) => match x.compute(ctx, opt, txn, None).await? {
+						Value::Strand(f) => match path.len() {
+							1 => {
+								v.remove(f.as_str());
+								Ok(())
+							}
+							_ => match v.get_mut(f.as_str()) {
+								Some(v) if v.is_some() => v.del(ctx, opt, txn, path.next()).await,
+								_ => Ok(()),
+							},
+						},
+						_ => Ok(()),
+					},
 					_ => Ok(()),
 				},
-				// Current path part is an array
+				// Current value at path is an array
 				Value::Array(v) => match p {
 					Part::All => match path.len() {
 						1 => {
@@ -47,13 +70,13 @@ impl Value {
 						_ => {
 							let path = path.next();
 							let futs = v.iter_mut().map(|v| v.del(ctx, opt, txn, path));
-							try_join_all(futs).await?;
+							try_join_all_buffered(futs).await?;
 							Ok(())
 						}
 					},
 					Part::First => match path.len() {
 						1 => {
-							if v.len().gt(&0) {
+							if !v.is_empty() {
 								let i = 0;
 								v.remove(i);
 							}
@@ -66,7 +89,7 @@ impl Value {
 					},
 					Part::Last => match path.len() {
 						1 => {
-							if v.len().gt(&0) {
+							if !v.is_empty() {
 								let i = v.len() - 1;
 								v.remove(i);
 							}
@@ -79,7 +102,7 @@ impl Value {
 					},
 					Part::Index(i) => match path.len() {
 						1 => {
-							if v.len().gt(&i.to_usize()) {
+							if v.len() > i.to_usize() {
 								v.remove(i.to_usize());
 							}
 							Ok(())
@@ -91,36 +114,77 @@ impl Value {
 					},
 					Part::Where(w) => match path.len() {
 						1 => {
-							let mut m = HashMap::new();
+							// TODO: If further optimization is desired, push indices to a vec,
+							// iterate in reverse, and call swap_remove
+							let mut m = HashSet::new();
 							for (i, v) in v.iter().enumerate() {
-								if w.compute(ctx, opt, txn, Some(v)).await?.is_truthy() {
-									m.insert(i, ());
+								let cur = v.into();
+								if w.compute(ctx, opt, txn, Some(&cur)).await?.is_truthy() {
+									m.insert(i);
 								};
 							}
-							v.abolish(|i| m.contains_key(&i));
+							v.abolish(|i| m.contains(&i));
 							Ok(())
 						}
-						_ => {
-							let path = path.next();
-							for v in v.iter_mut() {
-								if w.compute(ctx, opt, txn, Some(v)).await?.is_truthy() {
-									v.del(ctx, opt, txn, path).await?;
+						_ => match path.next().first() {
+							Some(Part::Index(_)) => {
+								let mut a = Vec::new();
+								let mut p = Vec::new();
+								// Store the elements and positions to update
+								for (i, o) in v.iter_mut().enumerate() {
+									let cur = o.into();
+									if w.compute(ctx, opt, txn, Some(&cur)).await?.is_truthy() {
+										a.push(o.clone());
+										p.push(i);
+									}
 								}
+								// Convert the matched elements array to a value
+								let mut a = Value::from(a);
+								// Set the new value on the matches elements
+								a.del(ctx, opt, txn, path.next()).await?;
+								// Push the new values into the original array
+								for (i, p) in p.into_iter().enumerate().rev() {
+									match a.pick(&[Part::Index(i.into())]) {
+										Value::None => {
+											v.remove(i);
+										}
+										x => v[p] = x,
+									}
+								}
+								Ok(())
 							}
-							Ok(())
-						}
+							_ => {
+								let path = path.next();
+								for v in v.iter_mut() {
+									let cur = v.into();
+									if w.compute(ctx, opt, txn, Some(&cur)).await?.is_truthy() {
+										v.del(ctx, opt, txn, path).await?;
+									}
+								}
+								Ok(())
+							}
+						},
 					},
-					_ => match path.len() {
-						1 => {
-							v.clear();
-							Ok(())
-						}
-						_ => {
-							let futs = v.iter_mut().map(|v| v.del(ctx, opt, txn, path));
-							try_join_all(futs).await?;
-							Ok(())
-						}
+					Part::Value(x) => match x.compute(ctx, opt, txn, None).await? {
+						Value::Number(i) => match path.len() {
+							1 => {
+								if v.len() > i.to_usize() {
+									v.remove(i.to_usize());
+								}
+								Ok(())
+							}
+							_ => match v.get_mut(i.to_usize()) {
+								Some(v) => v.del(ctx, opt, txn, path.next()).await,
+								None => Ok(()),
+							},
+						},
+						_ => Ok(()),
 					},
+					_ => {
+						let futs = v.iter_mut().map(|v| v.del(ctx, opt, txn, path));
+						try_join_all_buffered(futs).await?;
+						Ok(())
+					}
 				},
 				// Ignore everything else
 				_ => Ok(()),
@@ -203,8 +267,10 @@ mod tests {
 	async fn del_array_field() {
 		let (ctx, opt, txn) = mock().await;
 		let idi = Idiom::parse("test.something[1].age");
-		let mut val = Value::parse("{ test: { something: [{ age: 34 }, { age: 36 }] } }");
-		let res = Value::parse("{ test: { something: [{ age: 34 }, { }] } }");
+		let mut val = Value::parse(
+			"{ test: { something: [{ name: 'A', age: 34 }, { name: 'B', age: 36 }] } }",
+		);
+		let res = Value::parse("{ test: { something: [{ name: 'A', age: 34 }, { name: 'B' }] } }");
 		val.del(&ctx, &opt, &txn, &idi).await.unwrap();
 		assert_eq!(res, val);
 	}
@@ -213,8 +279,10 @@ mod tests {
 	async fn del_array_fields() {
 		let (ctx, opt, txn) = mock().await;
 		let idi = Idiom::parse("test.something[*].age");
-		let mut val = Value::parse("{ test: { something: [{ age: 34 }, { age: 36 }] } }");
-		let res = Value::parse("{ test: { something: [{ }, { }] } }");
+		let mut val = Value::parse(
+			"{ test: { something: [{ name: 'A', age: 34 }, { name: 'B', age: 36 }] } }",
+		);
+		let res = Value::parse("{ test: { something: [{ name: 'A' }, { name: 'B' }] } }");
 		val.del(&ctx, &opt, &txn, &idi).await.unwrap();
 		assert_eq!(res, val);
 	}
@@ -222,9 +290,11 @@ mod tests {
 	#[tokio::test]
 	async fn del_array_fields_flat() {
 		let (ctx, opt, txn) = mock().await;
-		let idi = Idiom::parse("test.something[*].age");
-		let mut val = Value::parse("{ test: { something: [{ age: 34 }, { age: 36 }] } }");
-		let res = Value::parse("{ test: { something: [{ }, { }] } }");
+		let idi = Idiom::parse("test.something.age");
+		let mut val = Value::parse(
+			"{ test: { something: [{ name: 'A', age: 34 }, { name: 'B', age: 36 }] } }",
+		);
+		let res = Value::parse("{ test: { something: [{ name: 'A' }, { name: 'B' }] } }");
 		val.del(&ctx, &opt, &txn, &idi).await.unwrap();
 		assert_eq!(res, val);
 	}
@@ -233,8 +303,10 @@ mod tests {
 	async fn del_array_where_field() {
 		let (ctx, opt, txn) = mock().await;
 		let idi = Idiom::parse("test.something[WHERE age > 35].age");
-		let mut val = Value::parse("{ test: { something: [{ age: 34 }, { age: 36 }] } }");
-		let res = Value::parse("{ test: { something: [{ age: 34 }, { }] } }");
+		let mut val = Value::parse(
+			"{ test: { something: [{ name: 'A', age: 34 }, { name: 'B', age: 36 }] } }",
+		);
+		let res = Value::parse("{ test: { something: [{ name: 'A', age: 34 }, { name: 'B' }] } }");
 		val.del(&ctx, &opt, &txn, &idi).await.unwrap();
 		assert_eq!(res, val);
 	}
@@ -243,8 +315,22 @@ mod tests {
 	async fn del_array_where_fields() {
 		let (ctx, opt, txn) = mock().await;
 		let idi = Idiom::parse("test.something[WHERE age > 35]");
-		let mut val = Value::parse("{ test: { something: [{ age: 34 }, { age: 36 }] } }");
-		let res = Value::parse("{ test: { something: [{ age: 34 }] } }");
+		let mut val = Value::parse(
+			"{ test: { something: [{ name: 'A', age: 34 }, { name: 'B', age: 36 }] } }",
+		);
+		let res = Value::parse("{ test: { something: [{ name: 'A', age: 34 }] } }");
+		val.del(&ctx, &opt, &txn, &idi).await.unwrap();
+		assert_eq!(res, val);
+	}
+
+	#[tokio::test]
+	async fn del_array_where_fields_array_index() {
+		let (ctx, opt, txn) = mock().await;
+		let idi = Idiom::parse("test.something[WHERE age > 30][0]");
+		let mut val = Value::parse(
+			"{ test: { something: [{ name: 'A', age: 34 }, { name: 'B', age: 36 }] } }",
+		);
+		let res = Value::parse("{ test: { something: [{ name: 'B', age: 36 }] } }");
 		val.del(&ctx, &opt, &txn, &idi).await.unwrap();
 		assert_eq!(res, val);
 	}

@@ -1,12 +1,13 @@
 use crate::ctx::Context;
-use crate::dbs::Auth;
+use crate::iam::Auth;
+use crate::iam::{Level, Role};
 use crate::sql::value::Value;
 use std::sync::Arc;
 
 /// Specifies the current session information when processing a query.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Session {
-	/// The current [`Auth`] information
+	/// The current session [`Auth`] information
 	pub au: Arc<Auth>,
 	/// Whether realtime queries are supported
 	pub rt: bool,
@@ -22,84 +23,130 @@ pub struct Session {
 	pub db: Option<String>,
 	/// The currently selected authentication scope
 	pub sc: Option<String>,
+	/// The current scope authentication token
+	pub tk: Option<Value>,
 	/// The current scope authentication data
 	pub sd: Option<Value>,
 }
 
 impl Session {
-	/// Create a session with root authentication
-	pub fn for_kv() -> Session {
-		Session {
-			au: Arc::new(Auth::Kv),
-			..Session::default()
-		}
+	/// Set the selected namespace for the session
+	pub fn with_ns(mut self, ns: &str) -> Session {
+		self.ns = Some(ns.to_owned());
+		self
 	}
-	/// Create a session with namespace authentication
-	pub fn for_ns<S>(ns: S) -> Session
-	where
-		S: Into<String> + Clone,
-	{
-		Session {
-			ns: Some(ns.clone().into()),
-			au: Arc::new(Auth::Ns(ns.into())),
-			..Session::default()
-		}
+
+	/// Set the selected database for the session
+	pub fn with_db(mut self, db: &str) -> Session {
+		self.db = Some(db.to_owned());
+		self
 	}
-	/// Create a session with database authentication
-	pub fn for_db<S>(ns: S, db: S) -> Session
-	where
-		S: Into<String> + Clone,
-	{
-		Session {
-			ns: Some(ns.clone().into()),
-			db: Some(db.clone().into()),
-			au: Arc::new(Auth::Db(ns.into(), db.into())),
-			..Session::default()
-		}
+
+	/// Set the selected database for the session
+	pub fn with_sc(mut self, sc: &str) -> Session {
+		self.sc = Some(sc.to_owned());
+		self
 	}
-	/// Create a session with scope authentication
-	pub fn for_sc<S>(ns: S, db: S, sc: S) -> Session
-	where
-		S: Into<String> + Clone,
-	{
-		Session {
-			ns: Some(ns.clone().into()),
-			db: Some(db.clone().into()),
-			sc: Some(sc.clone().into()),
-			au: Arc::new(Auth::Sc(ns.into(), db.into(), sc.into())),
-			..Session::default()
-		}
+
+	// Set the realtime functionality of the session
+	pub fn with_rt(mut self, rt: bool) -> Session {
+		self.rt = rt;
+		self
 	}
+
 	/// Retrieves the selected namespace
-	pub(crate) fn ns(&self) -> Option<Arc<String>> {
-		self.ns.to_owned().map(Arc::new)
+	pub(crate) fn ns(&self) -> Option<Arc<str>> {
+		self.ns.as_deref().map(Into::into)
 	}
+
 	/// Retrieves the selected database
-	pub(crate) fn db(&self) -> Option<Arc<String>> {
-		self.db.to_owned().map(Arc::new)
+	pub(crate) fn db(&self) -> Option<Arc<str>> {
+		self.db.as_deref().map(Into::into)
 	}
+
+	/// Checks if live queries are allowed
+	pub(crate) fn live(&self) -> bool {
+		self.rt
+	}
+
 	/// Convert a session into a runtime
 	pub(crate) fn context<'a>(&self, mut ctx: Context<'a>) -> Context<'a> {
-		// Add scope value
-		let key = String::from("scope");
-		let val: Value = self.sc.to_owned().into();
-		ctx.add_value(key, val);
-		// Add auth data
-		let key = String::from("auth");
+		// Add scope auth data
 		let val: Value = self.sd.to_owned().into();
-		ctx.add_value(key, val);
+		ctx.add_value("auth", val);
+		// Add scope data
+		let val: Value = self.sc.to_owned().into();
+		ctx.add_value("scope", val);
+		// Add token data
+		let val: Value = self.tk.to_owned().into();
+		ctx.add_value("token", val);
 		// Add session value
-		let key = String::from("session");
 		let val: Value = Value::from(map! {
-			"ip".to_string() => self.ip.to_owned().into(),
-			"or".to_string() => self.or.to_owned().into(),
-			"id".to_string() => self.id.to_owned().into(),
-			"ns".to_string() => self.ns.to_owned().into(),
 			"db".to_string() => self.db.to_owned().into(),
+			"id".to_string() => self.id.to_owned().into(),
+			"ip".to_string() => self.ip.to_owned().into(),
+			"ns".to_string() => self.ns.to_owned().into(),
+			"or".to_string() => self.or.to_owned().into(),
 			"sc".to_string() => self.sc.to_owned().into(),
+			"sd".to_string() => self.sd.to_owned().into(),
+			"tk".to_string() => self.tk.to_owned().into(),
 		});
-		ctx.add_value(key, val);
+		ctx.add_value("session", val);
 		// Output context
 		ctx
+	}
+
+	/// Create a system session for a given level and role
+	pub fn for_level(level: Level, role: Role) -> Session {
+		// Create a new session
+		let mut sess = Session::default();
+		// Set the session details
+		match level {
+			Level::Root => {
+				sess.au = Arc::new(Auth::for_root(role));
+			}
+			Level::Namespace(ns) => {
+				sess.au = Arc::new(Auth::for_ns(role, &ns));
+				sess.ns = Some(ns);
+			}
+			Level::Database(ns, db) => {
+				sess.au = Arc::new(Auth::for_db(role, &ns, &db));
+				sess.ns = Some(ns);
+				sess.db = Some(db);
+			}
+			_ => {}
+		}
+		sess
+	}
+
+	/// Create a scoped session for a given NS and DB
+	pub fn for_scope(ns: &str, db: &str, sc: &str, rid: Value) -> Session {
+		Session {
+			au: Arc::new(Auth::for_sc(rid.to_string(), ns, db, sc)),
+			rt: false,
+			ip: None,
+			or: None,
+			id: None,
+			ns: Some(ns.to_owned()),
+			db: Some(db.to_owned()),
+			sc: Some(sc.to_owned()),
+			tk: None,
+			sd: Some(rid),
+		}
+	}
+
+	/// Create a system session for the root level with Owner role
+	pub fn owner() -> Session {
+		Session::for_level(Level::Root, Role::Owner)
+	}
+
+	/// Create a system session for the root level with Editor role
+	pub fn editor() -> Session {
+		Session::for_level(Level::Root, Role::Editor)
+	}
+
+	/// Create a system session for the root level with Viwer role
+	pub fn viewer() -> Session {
+		Session::for_level(Level::Root, Role::Viewer)
 	}
 }

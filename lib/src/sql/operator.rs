@@ -1,3 +1,4 @@
+use crate::idx::ft::MatchRef;
 use crate::sql::comment::mightbespace;
 use crate::sql::comment::shouldbespace;
 use crate::sql::error::IResult;
@@ -5,33 +6,49 @@ use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::bytes::complete::tag_no_case;
 use nom::character::complete::char;
-use nom::combinator::map;
+use nom::character::complete::u32 as uint32;
+use nom::character::complete::u8 as uint8;
+use nom::combinator::cut;
+use nom::combinator::opt;
+use nom::combinator::value;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::fmt::Write;
 
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
+/// Binary operators.
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
 pub enum Operator {
+	//
+	Neg, // -
+	Not, // !
+	//
 	Or,  // ||
 	And, // &&
+	Tco, // ?: Ternary conditional operator
+	Nco, // ?? Null coalescing operator
 	//
 	Add, // +
 	Sub, // -
 	Mul, // *
 	Div, // /
+	Pow, // **
 	Inc, // +=
 	Dec, // -=
-	//
-	Exact, // ==
+	Ext, // +?=
 	//
 	Equal,    // =
+	Exact,    // ==
 	NotEqual, // !=
 	AllEqual, // *=
 	AnyEqual, // ?=
 	//
-	Like,    // ~
-	NotLike, // !~
-	AllLike, // *~
-	AnyLike, // ?~
+	Like,                      // ~
+	NotLike,                   // !~
+	AllLike,                   // *~
+	AnyLike,                   // ?~
+	Matches(Option<MatchRef>), // @{ref}@
 	//
 	LessThan,        // <
 	LessThanOrEqual, // <=
@@ -48,13 +65,16 @@ pub enum Operator {
 	AllInside,   // ⊆
 	AnyInside,   // ⊂
 	NoneInside,  // ⊄
-	Outside,     // ∈
-	Intersects,  // ∩
+	//
+	Outside,
+	Intersects,
+	//
+	Knn(u32), // <{k}>
 }
 
 impl Default for Operator {
-	fn default() -> Operator {
-		Operator::Equal
+	fn default() -> Self {
+		Self::Equal
 	}
 }
 
@@ -62,13 +82,15 @@ impl Operator {
 	#[inline]
 	pub fn precedence(&self) -> u8 {
 		match self {
-			Operator::Or => 1,
-			Operator::And => 2,
-			Operator::Sub => 4,
-			Operator::Add => 5,
-			Operator::Mul => 6,
-			Operator::Div => 7,
-			_ => 3,
+			Self::Or => 1,
+			Self::And => 2,
+			Self::Tco => 3,
+			Self::Nco => 4,
+			Self::Sub => 6,
+			Self::Add => 7,
+			Self::Mul => 8,
+			Self::Div => 9,
+			_ => 5,
 		}
 	}
 }
@@ -76,131 +98,217 @@ impl Operator {
 impl fmt::Display for Operator {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		match self {
-			Operator::Or => write!(f, "OR"),
-			Operator::And => write!(f, "AND"),
-			Operator::Add => write!(f, "+"),
-			Operator::Sub => write!(f, "-"),
-			Operator::Mul => write!(f, "*"),
-			Operator::Div => write!(f, "/"),
-			Operator::Inc => write!(f, "+="),
-			Operator::Dec => write!(f, "-="),
-			Operator::Exact => write!(f, "=="),
-			Operator::Equal => write!(f, "="),
-			Operator::NotEqual => write!(f, "!="),
-			Operator::AllEqual => write!(f, "*="),
-			Operator::AnyEqual => write!(f, "?="),
-			Operator::Like => write!(f, "~"),
-			Operator::NotLike => write!(f, "!~"),
-			Operator::AllLike => write!(f, "*~"),
-			Operator::AnyLike => write!(f, "?~"),
-			Operator::LessThan => write!(f, "<"),
-			Operator::LessThanOrEqual => write!(f, "<="),
-			Operator::MoreThan => write!(f, ">"),
-			Operator::MoreThanOrEqual => write!(f, ">="),
-			Operator::Contain => write!(f, "CONTAINS"),
-			Operator::NotContain => write!(f, "CONTAINSNOT"),
-			Operator::ContainAll => write!(f, "CONTAINSALL"),
-			Operator::ContainAny => write!(f, "CONTAINSANY"),
-			Operator::ContainNone => write!(f, "CONTAINSNONE"),
-			Operator::Inside => write!(f, "INSIDE"),
-			Operator::NotInside => write!(f, "NOTINSIDE"),
-			Operator::AllInside => write!(f, "ALLINSIDE"),
-			Operator::AnyInside => write!(f, "ANYINSIDE"),
-			Operator::NoneInside => write!(f, "NONEINSIDE"),
-			Operator::Outside => write!(f, "OUTSIDE"),
-			Operator::Intersects => write!(f, "INTERSECTS"),
+			Self::Neg => f.write_str("-"),
+			Self::Not => f.write_str("!"),
+			Self::Or => f.write_str("OR"),
+			Self::And => f.write_str("AND"),
+			Self::Tco => f.write_str("?:"),
+			Self::Nco => f.write_str("??"),
+			Self::Add => f.write_str("+"),
+			Self::Sub => f.write_char('-'),
+			Self::Mul => f.write_char('*'),
+			Self::Div => f.write_char('/'),
+			Self::Pow => f.write_str("**"),
+			Self::Inc => f.write_str("+="),
+			Self::Dec => f.write_str("-="),
+			Self::Ext => f.write_str("+?="),
+			Self::Equal => f.write_char('='),
+			Self::Exact => f.write_str("=="),
+			Self::NotEqual => f.write_str("!="),
+			Self::AllEqual => f.write_str("*="),
+			Self::AnyEqual => f.write_str("?="),
+			Self::Like => f.write_char('~'),
+			Self::NotLike => f.write_str("!~"),
+			Self::AllLike => f.write_str("*~"),
+			Self::AnyLike => f.write_str("?~"),
+			Self::LessThan => f.write_char('<'),
+			Self::LessThanOrEqual => f.write_str("<="),
+			Self::MoreThan => f.write_char('>'),
+			Self::MoreThanOrEqual => f.write_str(">="),
+			Self::Contain => f.write_str("CONTAINS"),
+			Self::NotContain => f.write_str("CONTAINSNOT"),
+			Self::ContainAll => f.write_str("CONTAINSALL"),
+			Self::ContainAny => f.write_str("CONTAINSANY"),
+			Self::ContainNone => f.write_str("CONTAINSNONE"),
+			Self::Inside => f.write_str("INSIDE"),
+			Self::NotInside => f.write_str("NOTINSIDE"),
+			Self::AllInside => f.write_str("ALLINSIDE"),
+			Self::AnyInside => f.write_str("ANYINSIDE"),
+			Self::NoneInside => f.write_str("NONEINSIDE"),
+			Self::Outside => f.write_str("OUTSIDE"),
+			Self::Intersects => f.write_str("INTERSECTS"),
+			Self::Matches(reference) => {
+				if let Some(r) = reference {
+					write!(f, "@{}@", r)
+				} else {
+					f.write_str("@@")
+				}
+			}
+			Self::Knn(k) => write!(f, "<{}>", k),
 		}
 	}
 }
 
 pub fn assigner(i: &str) -> IResult<&str, Operator> {
 	alt((
-		map(char('='), |_| Operator::Equal),
-		map(tag("+="), |_| Operator::Inc),
-		map(tag("-="), |_| Operator::Dec),
+		value(Operator::Equal, char('=')),
+		value(Operator::Inc, tag("+=")),
+		value(Operator::Dec, tag("-=")),
+		value(Operator::Ext, tag("+?=")),
 	))(i)
 }
 
-pub fn operator(i: &str) -> IResult<&str, Operator> {
-	alt((symbols, phrases))(i)
+pub fn unary(i: &str) -> IResult<&str, Operator> {
+	unary_symbols(i)
 }
 
-pub fn symbols(i: &str) -> IResult<&str, Operator> {
+pub fn unary_symbols(i: &str) -> IResult<&str, Operator> {
+	let (i, _) = mightbespace(i)?;
+	let (i, v) = alt((value(Operator::Neg, tag("-")), value(Operator::Not, tag("!"))))(i)?;
+	let (i, _) = mightbespace(i)?;
+	Ok((i, v))
+}
+
+pub fn binary(i: &str) -> IResult<&str, Operator> {
+	alt((binary_symbols, binary_phrases))(i)
+}
+
+pub fn binary_symbols(i: &str) -> IResult<&str, Operator> {
 	let (i, _) = mightbespace(i)?;
 	let (i, v) = alt((
 		alt((
-			map(tag("=="), |_| Operator::Exact),
-			map(tag("!="), |_| Operator::NotEqual),
-			map(tag("*="), |_| Operator::AllEqual),
-			map(tag("?="), |_| Operator::AnyEqual),
-			map(char('='), |_| Operator::Equal),
+			value(Operator::Or, tag("||")),
+			value(Operator::And, tag("&&")),
+			value(Operator::Tco, tag("?:")),
+			value(Operator::Nco, tag("??")),
 		)),
 		alt((
-			map(tag("!~"), |_| Operator::NotLike),
-			map(tag("*~"), |_| Operator::AllLike),
-			map(tag("?~"), |_| Operator::AnyLike),
-			map(char('~'), |_| Operator::Like),
+			value(Operator::Exact, tag("==")),
+			value(Operator::NotEqual, tag("!=")),
+			value(Operator::AllEqual, tag("*=")),
+			value(Operator::AnyEqual, tag("?=")),
+			value(Operator::Equal, char('=')),
 		)),
 		alt((
-			map(tag("<="), |_| Operator::LessThanOrEqual),
-			map(char('<'), |_| Operator::LessThan),
-			map(tag(">="), |_| Operator::MoreThanOrEqual),
-			map(char('>'), |_| Operator::MoreThan),
+			value(Operator::NotLike, tag("!~")),
+			value(Operator::AllLike, tag("*~")),
+			value(Operator::AnyLike, tag("?~")),
+			value(Operator::Like, char('~')),
+			matches,
+			knn,
 		)),
 		alt((
-			map(char('+'), |_| Operator::Add),
-			map(char('-'), |_| Operator::Sub),
-			map(char('*'), |_| Operator::Mul),
-			map(char('×'), |_| Operator::Mul),
-			map(char('∙'), |_| Operator::Mul),
-			map(char('/'), |_| Operator::Div),
-			map(char('÷'), |_| Operator::Div),
+			value(Operator::LessThanOrEqual, tag("<=")),
+			value(Operator::LessThan, char('<')),
+			value(Operator::MoreThanOrEqual, tag(">=")),
+			value(Operator::MoreThan, char('>')),
+			knn,
 		)),
 		alt((
-			map(char('∋'), |_| Operator::Contain),
-			map(char('∌'), |_| Operator::NotContain),
-			map(char('∈'), |_| Operator::Inside),
-			map(char('∉'), |_| Operator::NotInside),
-			map(char('⊇'), |_| Operator::ContainAll),
-			map(char('⊃'), |_| Operator::ContainAny),
-			map(char('⊅'), |_| Operator::ContainNone),
-			map(char('⊆'), |_| Operator::AllInside),
-			map(char('⊂'), |_| Operator::AnyInside),
-			map(char('⊄'), |_| Operator::NoneInside),
+			value(Operator::Pow, tag("**")),
+			value(Operator::Add, char('+')),
+			value(Operator::Sub, char('-')),
+			value(Operator::Mul, char('*')),
+			value(Operator::Mul, char('×')),
+			value(Operator::Mul, char('∙')),
+			value(Operator::Div, char('/')),
+			value(Operator::Div, char('÷')),
+		)),
+		alt((
+			value(Operator::Contain, char('∋')),
+			value(Operator::NotContain, char('∌')),
+			value(Operator::Inside, char('∈')),
+			value(Operator::NotInside, char('∉')),
+			value(Operator::ContainAll, char('⊇')),
+			value(Operator::ContainAny, char('⊃')),
+			value(Operator::ContainNone, char('⊅')),
+			value(Operator::AllInside, char('⊆')),
+			value(Operator::AnyInside, char('⊂')),
+			value(Operator::NoneInside, char('⊄')),
 		)),
 	))(i)?;
 	let (i, _) = mightbespace(i)?;
 	Ok((i, v))
 }
 
-pub fn phrases(i: &str) -> IResult<&str, Operator> {
+pub fn binary_phrases(i: &str) -> IResult<&str, Operator> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, v) = alt((
 		alt((
-			map(tag_no_case("&&"), |_| Operator::And),
-			map(tag_no_case("AND"), |_| Operator::And),
-			map(tag_no_case("||"), |_| Operator::Or),
-			map(tag_no_case("OR"), |_| Operator::Or),
+			value(Operator::Or, tag_no_case("OR")),
+			value(Operator::And, tag_no_case("AND")),
+			value(Operator::NotEqual, tag_no_case("IS NOT")),
+			value(Operator::Equal, tag_no_case("IS")),
 		)),
 		alt((
-			map(tag_no_case("IS NOT"), |_| Operator::NotEqual),
-			map(tag_no_case("IS"), |_| Operator::Equal),
-		)),
-		alt((
-			map(tag_no_case("CONTAINSALL"), |_| Operator::ContainAll),
-			map(tag_no_case("CONTAINSANY"), |_| Operator::ContainAny),
-			map(tag_no_case("CONTAINSNONE"), |_| Operator::ContainNone),
-			map(tag_no_case("CONTAINSNOT"), |_| Operator::NotContain),
-			map(tag_no_case("CONTAINS"), |_| Operator::Contain),
-			map(tag_no_case("ALLINSIDE"), |_| Operator::AllInside),
-			map(tag_no_case("ANYINSIDE"), |_| Operator::AnyInside),
-			map(tag_no_case("NONEINSIDE"), |_| Operator::NoneInside),
-			map(tag_no_case("NOTINSIDE"), |_| Operator::NotInside),
-			map(tag_no_case("INSIDE"), |_| Operator::Inside),
-			map(tag_no_case("OUTSIDE"), |_| Operator::Outside),
-			map(tag_no_case("INTERSECTS"), |_| Operator::Intersects),
+			value(Operator::ContainAll, tag_no_case("CONTAINSALL")),
+			value(Operator::ContainAny, tag_no_case("CONTAINSANY")),
+			value(Operator::ContainNone, tag_no_case("CONTAINSNONE")),
+			value(Operator::NotContain, tag_no_case("CONTAINSNOT")),
+			value(Operator::Contain, tag_no_case("CONTAINS")),
+			value(Operator::AllInside, tag_no_case("ALLINSIDE")),
+			value(Operator::AnyInside, tag_no_case("ANYINSIDE")),
+			value(Operator::NoneInside, tag_no_case("NONEINSIDE")),
+			value(Operator::NotInside, tag_no_case("NOTINSIDE")),
+			value(Operator::Inside, tag_no_case("INSIDE")),
+			value(Operator::Outside, tag_no_case("OUTSIDE")),
+			value(Operator::Intersects, tag_no_case("INTERSECTS")),
+			value(Operator::NotInside, tag_no_case("NOT IN")),
+			value(Operator::Inside, tag_no_case("IN")),
 		)),
 	))(i)?;
 	let (i, _) = shouldbespace(i)?;
 	Ok((i, v))
+}
+
+pub fn matches(i: &str) -> IResult<&str, Operator> {
+	let (i, _) = char('@')(i)?;
+	cut(|i| {
+		let (i, reference) = opt(uint8)(i)?;
+		let (i, _) = char('@')(i)?;
+		Ok((i, Operator::Matches(reference)))
+	})(i)
+}
+
+pub fn knn(i: &str) -> IResult<&str, Operator> {
+	let (i, _) = char('<')(i)?;
+	let (i, k) = uint32(i)?;
+	let (i, _) = char('>')(i)?;
+	Ok((i, Operator::Knn(k)))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn matches_without_reference() {
+		let res = matches("@@");
+		let out = res.unwrap().1;
+		assert_eq!("@@", format!("{}", out));
+		assert_eq!(out, Operator::Matches(None));
+	}
+
+	#[test]
+	fn matches_with_reference() {
+		let res = matches("@12@");
+		let out = res.unwrap().1;
+		assert_eq!("@12@", format!("{}", out));
+		assert_eq!(out, Operator::Matches(Some(12u8)));
+	}
+
+	#[test]
+	fn matches_with_invalid_reference() {
+		let res = matches("@256@");
+		res.unwrap_err();
+	}
+
+	#[test]
+	fn test_knn() {
+		let res = knn("<5>");
+		assert!(res.is_ok());
+		let out = res.unwrap().1;
+		assert_eq!("<5>", format!("{}", out));
+		assert_eq!(out, Operator::Knn(5));
+	}
 }

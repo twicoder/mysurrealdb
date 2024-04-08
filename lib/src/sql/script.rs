@@ -1,40 +1,43 @@
+use crate::sql::comment::{block, slash};
 use crate::sql::error::IResult;
+use crate::sql::strand::no_nul_bytes;
 use nom::branch::alt;
-use nom::bytes::complete::escaped;
-use nom::bytes::complete::is_not;
-use nom::bytes::complete::tag;
-use nom::character::complete::one_of;
+use nom::bytes::complete::{escaped, is_not, tag};
+use nom::character::complete::{anychar, char, multispace0};
 use nom::combinator::recognize;
-use nom::multi::many1;
+use nom::multi::{many0, many1};
+use nom::sequence::delimited;
+use revision::revisioned;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::fmt::{self, Display, Formatter};
 use std::ops::Deref;
 use std::str;
 
-const SINGLE: &str = r#"'"#;
-const SINGLE_ESC: &str = r#"\'"#;
+const SINGLE: char = '\'';
+const SINGLE_ESC_NUL: &str = "'\\\0";
 
-const DOUBLE: &str = r#"""#;
-const DOUBLE_ESC: &str = r#"\""#;
+const DOUBLE: char = '"';
+const DOUBLE_ESC_NUL: &str = "\"\\\0";
 
-const BACKTICK: &str = r#"`"#;
-const BACKTICK_ESC: &str = r#"\`"#;
+const BACKTICK: char = '`';
+const BACKTICK_ESC_NUL: &str = "`\\\0";
 
-const OBJECT_BEG: &str = "{";
-const OBJECT_END: &str = "}";
+const OBJECT_BEG: char = '{';
+const OBJECT_END: char = '}';
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
-pub struct Script(pub String);
+#[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Hash)]
+#[revisioned(revision = 1)]
+pub struct Script(#[serde(with = "no_nul_bytes")] pub String);
 
 impl From<String> for Script {
 	fn from(s: String) -> Self {
-		Script(s)
+		Self(s)
 	}
 }
 
 impl From<&str> for Script {
 	fn from(s: &str) -> Self {
-		Script(String::from(s))
+		Self::from(String::from(s))
 	}
 }
 
@@ -45,51 +48,75 @@ impl Deref for Script {
 	}
 }
 
-impl fmt::Display for Script {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "{}", self.0)
+impl Display for Script {
+	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+		Display::fmt(&self.0, f)
 	}
 }
 
 pub fn script(i: &str) -> IResult<&str, Script> {
-	let (i, v) = recognize(script_raw)(i)?;
+	let (i, v) = script_raw(i)?;
 	Ok((i, Script(String::from(v))))
 }
 
 fn script_raw(i: &str) -> IResult<&str, &str> {
-	recognize(many1(alt((char_any, char_object, string_single, string_double, string_backtick))))(i)
+	let _diving = crate::sql::parser::depth::dive(i)?;
+	recognize(many0(alt((
+		script_comment,
+		script_object,
+		script_string,
+		script_maths,
+		script_other,
+	))))(i)
 }
 
-fn char_any(i: &str) -> IResult<&str, &str> {
-	is_not("{}'`\"")(i)
+fn script_maths(i: &str) -> IResult<&str, &str> {
+	recognize(tag("/"))(i)
 }
 
-fn char_object(i: &str) -> IResult<&str, &str> {
-	let (i, _) = tag(OBJECT_BEG)(i)?;
-	let (i, v) = script_raw(i)?;
-	let (i, _) = tag(OBJECT_END)(i)?;
-	Ok((i, v))
+fn script_other(i: &str) -> IResult<&str, &str> {
+	recognize(many1(is_not("/{}`'\"")))(i)
 }
 
-fn string_single(i: &str) -> IResult<&str, &str> {
-	let (i, _) = tag(SINGLE)(i)?;
-	let (i, v) = alt((escaped(is_not(SINGLE_ESC), '\\', one_of(SINGLE)), tag("")))(i)?;
-	let (i, _) = tag(SINGLE)(i)?;
-	Ok((i, v))
+fn script_comment(i: &str) -> IResult<&str, &str> {
+	recognize(delimited(multispace0, many1(alt((block, slash))), multispace0))(i)
 }
 
-fn string_double(i: &str) -> IResult<&str, &str> {
-	let (i, _) = tag(DOUBLE)(i)?;
-	let (i, v) = alt((escaped(is_not(DOUBLE_ESC), '\\', one_of(DOUBLE)), tag("")))(i)?;
-	let (i, _) = tag(DOUBLE)(i)?;
-	Ok((i, v))
+fn script_object(i: &str) -> IResult<&str, &str> {
+	recognize(delimited(char(OBJECT_BEG), script_raw, char(OBJECT_END)))(i)
 }
 
-fn string_backtick(i: &str) -> IResult<&str, &str> {
-	let (i, _) = tag(BACKTICK)(i)?;
-	let (i, v) = alt((escaped(is_not(BACKTICK_ESC), '\\', one_of(BACKTICK)), tag("")))(i)?;
-	let (i, _) = tag(BACKTICK)(i)?;
-	Ok((i, v))
+fn script_string(i: &str) -> IResult<&str, &str> {
+	recognize(alt((
+		|i| {
+			let (i, _) = char(SINGLE)(i)?;
+			let (i, _) = char(SINGLE)(i)?;
+			Ok((i, ""))
+		},
+		|i| {
+			let (i, _) = char(DOUBLE)(i)?;
+			let (i, _) = char(DOUBLE)(i)?;
+			Ok((i, ""))
+		},
+		|i| {
+			let (i, _) = char(SINGLE)(i)?;
+			let (i, v) = escaped(is_not(SINGLE_ESC_NUL), '\\', anychar)(i)?;
+			let (i, _) = char(SINGLE)(i)?;
+			Ok((i, v))
+		},
+		|i| {
+			let (i, _) = char(DOUBLE)(i)?;
+			let (i, v) = escaped(is_not(DOUBLE_ESC_NUL), '\\', anychar)(i)?;
+			let (i, _) = char(DOUBLE)(i)?;
+			Ok((i, v))
+		},
+		|i| {
+			let (i, _) = char(BACKTICK)(i)?;
+			let (i, v) = escaped(is_not(BACKTICK_ESC_NUL), '\\', anychar)(i)?;
+			let (i, _) = char(BACKTICK)(i)?;
+			Ok((i, v))
+		},
+	)))(i)
 }
 
 #[cfg(test)]
@@ -101,7 +128,6 @@ mod tests {
 	fn script_basic() {
 		let sql = "return true;";
 		let res = script(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("return true;", format!("{}", out));
 		assert_eq!(out, Script::from("return true;"));
@@ -111,7 +137,6 @@ mod tests {
 	fn script_object() {
 		let sql = "return { test: true, something: { other: true } };";
 		let res = script(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!("return { test: true, something: { other: true } };", format!("{}", out));
 		assert_eq!(out, Script::from("return { test: true, something: { other: true } };"));
@@ -121,7 +146,6 @@ mod tests {
 	fn script_closure() {
 		let sql = "return this.values.map(v => `This value is ${Number(v * 3)}`);";
 		let res = script(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(
 			"return this.values.map(v => `This value is ${Number(v * 3)}`);",
@@ -137,7 +161,6 @@ mod tests {
 	fn script_complex() {
 		let sql = r#"return { test: true, some: { object: "some text with uneven {{{ {} \" brackets", else: false } };"#;
 		let res = script(sql);
-		assert!(res.is_ok());
 		let out = res.unwrap().1;
 		assert_eq!(
 			r#"return { test: true, some: { object: "some text with uneven {{{ {} \" brackets", else: false } };"#,
@@ -149,5 +172,34 @@ mod tests {
 				r#"return { test: true, some: { object: "some text with uneven {{{ {} \" brackets", else: false } };"#
 			)
 		);
+	}
+
+	#[test]
+	fn script_advanced() {
+		let sql = r#"
+			// {
+			// }
+			// {}
+			// { }
+			/* { */
+			/* } */
+			/* {} */
+			/* { } */
+			/* {{{ $ }} */
+			/* /* /* /* */
+			let x = {};
+			let x = { };
+			let x = '{';
+			let x = "{";
+			let x = '}';
+			let x = "}";
+			let x = '} } { {';
+			let x = 3 / 4 * 2;
+			let x = /* something */ 45 + 2;
+		"#;
+		let res = script(sql);
+		let out = res.unwrap().1;
+		assert_eq!(sql, format!("{}", out));
+		assert_eq!(out, Script::from(sql));
 	}
 }
