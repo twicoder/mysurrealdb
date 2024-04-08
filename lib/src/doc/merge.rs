@@ -1,5 +1,5 @@
+use crate::ctx::Context;
 use crate::dbs::Options;
-use crate::dbs::Runtime;
 use crate::dbs::Statement;
 use crate::dbs::Transaction;
 use crate::doc::Document;
@@ -11,10 +11,10 @@ use crate::sql::value::Value;
 impl<'a> Document<'a> {
 	pub async fn merge(
 		&mut self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
-		stm: &Statement,
+		stm: &Statement<'_>,
 	) -> Result<(), Error> {
 		// Get the record id
 		let rid = self.id.as_ref().unwrap();

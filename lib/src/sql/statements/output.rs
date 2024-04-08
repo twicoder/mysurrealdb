@@ -1,5 +1,5 @@
+use crate::ctx::Context;
 use crate::dbs::Options;
-use crate::dbs::Runtime;
 use crate::dbs::Transaction;
 use crate::err::Error;
 use crate::sql::comment::shouldbespace;
@@ -16,9 +16,13 @@ pub struct OutputStatement {
 }
 
 impl OutputStatement {
+	pub(crate) fn writeable(&self) -> bool {
+		self.what.writeable()
+	}
+
 	pub(crate) async fn compute(
 		&self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		doc: Option<&Value>,

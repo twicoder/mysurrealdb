@@ -1,6 +1,6 @@
+use crate::ctx::Context;
 use crate::dbs::Level;
 use crate::dbs::Options;
-use crate::dbs::Runtime;
 use crate::dbs::Transaction;
 use crate::err::Error;
 use crate::sql::algorithm::{algorithm, Algorithm};
@@ -8,7 +8,8 @@ use crate::sql::base::{base, Base};
 use crate::sql::comment::shouldbespace;
 use crate::sql::duration::{duration, Duration};
 use crate::sql::error::IResult;
-use crate::sql::ident::ident_raw;
+use crate::sql::escape::escape_strand;
+use crate::sql::ident::{ident, Ident};
 use crate::sql::idiom;
 use crate::sql::idiom::{Idiom, Idioms};
 use crate::sql::kind::{kind, Kind};
@@ -48,7 +49,7 @@ pub enum DefineStatement {
 impl DefineStatement {
 	pub(crate) async fn compute(
 		&self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		doc: Option<&Value>,
@@ -103,13 +104,13 @@ pub fn define(i: &str) -> IResult<&str, DefineStatement> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct DefineNamespaceStatement {
-	pub name: String,
+	pub name: Ident,
 }
 
 impl DefineNamespaceStatement {
 	pub(crate) async fn compute(
 		&self,
-		_ctx: &Runtime,
+		_ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		_doc: Option<&Value>,
@@ -135,7 +136,7 @@ fn namespace(i: &str) -> IResult<&str, DefineNamespaceStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = alt((tag_no_case("NS"), tag_no_case("NAMESPACE")))(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	Ok((
 		i,
 		DefineNamespaceStatement {
@@ -150,13 +151,13 @@ fn namespace(i: &str) -> IResult<&str, DefineNamespaceStatement> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct DefineDatabaseStatement {
-	pub name: String,
+	pub name: Ident,
 }
 
 impl DefineDatabaseStatement {
 	pub(crate) async fn compute(
 		&self,
-		_ctx: &Runtime,
+		_ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		_doc: Option<&Value>,
@@ -187,7 +188,7 @@ fn database(i: &str) -> IResult<&str, DefineDatabaseStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = alt((tag_no_case("DB"), tag_no_case("DATABASE")))(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	Ok((
 		i,
 		DefineDatabaseStatement {
@@ -202,7 +203,7 @@ fn database(i: &str) -> IResult<&str, DefineDatabaseStatement> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct DefineLoginStatement {
-	pub name: String,
+	pub name: Ident,
 	pub base: Base,
 	pub hash: String,
 	pub code: String,
@@ -211,7 +212,7 @@ pub struct DefineLoginStatement {
 impl DefineLoginStatement {
 	pub(crate) async fn compute(
 		&self,
-		_ctx: &Runtime,
+		_ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		_doc: Option<&Value>,
@@ -253,7 +254,13 @@ impl DefineLoginStatement {
 
 impl fmt::Display for DefineLoginStatement {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "DEFINE LOGIN {} ON {} PASSHASH {}", self.name, self.base, self.hash)
+		write!(
+			f,
+			"DEFINE LOGIN {} ON {} PASSHASH {}",
+			self.name,
+			self.base,
+			escape_strand(&self.hash)
+		)
 	}
 }
 
@@ -262,7 +269,7 @@ fn login(i: &str) -> IResult<&str, DefineLoginStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("LOGIN")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("ON")(i)?;
 	let (i, _) = shouldbespace(i)?;
@@ -321,7 +328,7 @@ fn login_hash(i: &str) -> IResult<&str, DefineLoginOption> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct DefineTokenStatement {
-	pub name: String,
+	pub name: Ident,
 	pub base: Base,
 	pub kind: Algorithm,
 	pub code: String,
@@ -330,7 +337,7 @@ pub struct DefineTokenStatement {
 impl DefineTokenStatement {
 	pub(crate) async fn compute(
 		&self,
-		_ctx: &Runtime,
+		_ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		_doc: Option<&Value>,
@@ -375,7 +382,10 @@ impl fmt::Display for DefineTokenStatement {
 		write!(
 			f,
 			"DEFINE TOKEN {} ON {} TYPE {} VALUE {}",
-			self.name, self.base, self.kind, self.code
+			self.name,
+			self.base,
+			self.kind,
+			escape_strand(&self.code)
 		)
 	}
 }
@@ -385,7 +395,7 @@ fn token(i: &str) -> IResult<&str, DefineTokenStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("TOKEN")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("ON")(i)?;
 	let (i, _) = shouldbespace(i)?;
@@ -415,7 +425,7 @@ fn token(i: &str) -> IResult<&str, DefineTokenStatement> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct DefineScopeStatement {
-	pub name: String,
+	pub name: Ident,
 	pub code: String,
 	pub session: Option<Duration>,
 	pub signup: Option<Value>,
@@ -426,7 +436,7 @@ pub struct DefineScopeStatement {
 impl DefineScopeStatement {
 	pub(crate) async fn compute(
 		&self,
-		_ctx: &Runtime,
+		_ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		_doc: Option<&Value>,
@@ -471,7 +481,7 @@ fn scope(i: &str) -> IResult<&str, DefineScopeStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("SCOPE")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	let (i, opts) = many0(scope_opts)(i)?;
 	Ok((
 		i,
@@ -552,7 +562,7 @@ fn scope_connect(i: &str) -> IResult<&str, DefineScopeOption> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct DefineTableStatement {
-	pub name: String,
+	pub name: Ident,
 	pub drop: bool,
 	pub full: bool,
 	pub view: Option<View>,
@@ -562,7 +572,7 @@ pub struct DefineTableStatement {
 impl DefineTableStatement {
 	pub(crate) async fn compute(
 		&self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		doc: Option<&Value>,
@@ -633,7 +643,7 @@ fn table(i: &str) -> IResult<&str, DefineTableStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("TABLE")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	let (i, opts) = many0(table_opts)(i)?;
 	Ok((
 		i,
@@ -718,8 +728,8 @@ fn table_permissions(i: &str) -> IResult<&str, DefineTableOption> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct DefineEventStatement {
-	pub name: String,
-	pub what: String,
+	pub name: Ident,
+	pub what: Ident,
 	pub when: Value,
 	pub then: Values,
 }
@@ -727,7 +737,7 @@ pub struct DefineEventStatement {
 impl DefineEventStatement {
 	pub(crate) async fn compute(
 		&self,
-		_ctx: &Runtime,
+		_ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		_doc: Option<&Value>,
@@ -764,12 +774,12 @@ fn event(i: &str) -> IResult<&str, DefineEventStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("EVENT")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("ON")(i)?;
 	let (i, _) = opt(tuple((shouldbespace, tag_no_case("TABLE"))))(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, what) = ident_raw(i)?;
+	let (i, what) = ident(i)?;
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("WHEN")(i)?;
 	let (i, _) = shouldbespace(i)?;
@@ -796,7 +806,7 @@ fn event(i: &str) -> IResult<&str, DefineEventStatement> {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct DefineFieldStatement {
 	pub name: Idiom,
-	pub what: String,
+	pub what: Ident,
 	pub kind: Option<Kind>,
 	pub value: Option<Value>,
 	pub assert: Option<Value>,
@@ -806,7 +816,7 @@ pub struct DefineFieldStatement {
 impl DefineFieldStatement {
 	pub(crate) async fn compute(
 		&self,
-		_ctx: &Runtime,
+		_ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		_doc: Option<&Value>,
@@ -857,7 +867,7 @@ fn field(i: &str) -> IResult<&str, DefineFieldStatement> {
 	let (i, _) = tag_no_case("ON")(i)?;
 	let (i, _) = opt(tuple((shouldbespace, tag_no_case("TABLE"))))(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, what) = ident_raw(i)?;
+	let (i, what) = ident(i)?;
 	let (i, opts) = many0(field_opts)(i)?;
 	Ok((
 		i,
@@ -935,8 +945,8 @@ fn field_permissions(i: &str) -> IResult<&str, DefineFieldOption> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct DefineIndexStatement {
-	pub name: String,
-	pub what: String,
+	pub name: Ident,
+	pub what: Ident,
 	pub cols: Idioms,
 	pub uniq: bool,
 }
@@ -944,7 +954,7 @@ pub struct DefineIndexStatement {
 impl DefineIndexStatement {
 	pub(crate) async fn compute(
 		&self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		doc: Option<&Value>,
@@ -979,7 +989,7 @@ impl DefineIndexStatement {
 
 impl fmt::Display for DefineIndexStatement {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "DEFINE INDEX {} ON {} COLUMNS {}", self.name, self.what, self.cols)?;
+		write!(f, "DEFINE INDEX {} ON {} FIELDS {}", self.name, self.what, self.cols)?;
 		if self.uniq {
 			write!(f, " UNIQUE")?
 		}
@@ -992,14 +1002,14 @@ fn index(i: &str) -> IResult<&str, DefineIndexStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("INDEX")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("ON")(i)?;
 	let (i, _) = opt(tuple((shouldbespace, tag_no_case("TABLE"))))(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, what) = ident_raw(i)?;
+	let (i, what) = ident(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, _) = tag_no_case("COLUMNS")(i)?;
+	let (i, _) = alt((tag_no_case("COLUMNS"), tag_no_case("FIELDS")))(i)?;
 	let (i, _) = shouldbespace(i)?;
 	let (i, cols) = idiom::locals(i)?;
 	let (i, uniq) = opt(|i| {

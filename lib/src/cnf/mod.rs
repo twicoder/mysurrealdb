@@ -1,3 +1,4 @@
+#[cfg(feature = "parallel")]
 // Specifies how many concurrent jobs can be buffered in the worker channel.
 pub const MAX_CONCURRENT_TASKS: usize = 64;
 

@@ -1,12 +1,12 @@
+use crate::ctx::Context;
 use crate::dbs::Level;
 use crate::dbs::Options;
-use crate::dbs::Runtime;
 use crate::dbs::Transaction;
 use crate::err::Error;
 use crate::sql::base::{base, Base};
 use crate::sql::comment::shouldbespace;
 use crate::sql::error::IResult;
-use crate::sql::ident::ident_raw;
+use crate::sql::ident::{ident, Ident};
 use crate::sql::value::Value;
 use derive::Store;
 use nom::branch::alt;
@@ -32,7 +32,7 @@ pub enum RemoveStatement {
 impl RemoveStatement {
 	pub(crate) async fn compute(
 		&self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		doc: Option<&Value>,
@@ -87,13 +87,13 @@ pub fn remove(i: &str) -> IResult<&str, RemoveStatement> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct RemoveNamespaceStatement {
-	pub name: String,
+	pub name: Ident,
 }
 
 impl RemoveNamespaceStatement {
 	pub(crate) async fn compute(
 		&self,
-		_ctx: &Runtime,
+		_ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		_doc: Option<&Value>,
@@ -126,7 +126,7 @@ fn namespace(i: &str) -> IResult<&str, RemoveNamespaceStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = alt((tag_no_case("NS"), tag_no_case("NAMESPACE")))(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	Ok((
 		i,
 		RemoveNamespaceStatement {
@@ -141,13 +141,13 @@ fn namespace(i: &str) -> IResult<&str, RemoveNamespaceStatement> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct RemoveDatabaseStatement {
-	pub name: String,
+	pub name: Ident,
 }
 
 impl RemoveDatabaseStatement {
 	pub(crate) async fn compute(
 		&self,
-		_ctx: &Runtime,
+		_ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		_doc: Option<&Value>,
@@ -180,7 +180,7 @@ fn database(i: &str) -> IResult<&str, RemoveDatabaseStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = alt((tag_no_case("DB"), tag_no_case("DATABASE")))(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	Ok((
 		i,
 		RemoveDatabaseStatement {
@@ -195,14 +195,14 @@ fn database(i: &str) -> IResult<&str, RemoveDatabaseStatement> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct RemoveLoginStatement {
-	pub name: String,
+	pub name: Ident,
 	pub base: Base,
 }
 
 impl RemoveLoginStatement {
 	pub(crate) async fn compute(
 		&self,
-		_ctx: &Runtime,
+		_ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		_doc: Option<&Value>,
@@ -250,7 +250,7 @@ fn login(i: &str) -> IResult<&str, RemoveLoginStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("LOGIN")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("ON")(i)?;
 	let (i, _) = shouldbespace(i)?;
@@ -270,14 +270,14 @@ fn login(i: &str) -> IResult<&str, RemoveLoginStatement> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct RemoveTokenStatement {
-	pub name: String,
+	pub name: Ident,
 	pub base: Base,
 }
 
 impl RemoveTokenStatement {
 	pub(crate) async fn compute(
 		&self,
-		_ctx: &Runtime,
+		_ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		_doc: Option<&Value>,
@@ -325,7 +325,7 @@ fn token(i: &str) -> IResult<&str, RemoveTokenStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("TOKEN")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("ON")(i)?;
 	let (i, _) = shouldbespace(i)?;
@@ -345,13 +345,13 @@ fn token(i: &str) -> IResult<&str, RemoveTokenStatement> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct RemoveScopeStatement {
-	pub name: String,
+	pub name: Ident,
 }
 
 impl RemoveScopeStatement {
 	pub(crate) async fn compute(
 		&self,
-		_ctx: &Runtime,
+		_ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		_doc: Option<&Value>,
@@ -381,7 +381,7 @@ fn scope(i: &str) -> IResult<&str, RemoveScopeStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("SCOPE")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	Ok((
 		i,
 		RemoveScopeStatement {
@@ -396,13 +396,13 @@ fn scope(i: &str) -> IResult<&str, RemoveScopeStatement> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct RemoveTableStatement {
-	pub name: String,
+	pub name: Ident,
 }
 
 impl RemoveTableStatement {
 	pub(crate) async fn compute(
 		&self,
-		_ctx: &Runtime,
+		_ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		_doc: Option<&Value>,
@@ -435,7 +435,7 @@ fn table(i: &str) -> IResult<&str, RemoveTableStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("TABLE")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	Ok((
 		i,
 		RemoveTableStatement {
@@ -450,14 +450,14 @@ fn table(i: &str) -> IResult<&str, RemoveTableStatement> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct RemoveEventStatement {
-	pub name: String,
-	pub what: String,
+	pub name: Ident,
+	pub what: Ident,
 }
 
 impl RemoveEventStatement {
 	pub(crate) async fn compute(
 		&self,
-		_ctx: &Runtime,
+		_ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		_doc: Option<&Value>,
@@ -487,12 +487,12 @@ fn event(i: &str) -> IResult<&str, RemoveEventStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("EVENT")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("ON")(i)?;
 	let (i, _) = opt(tuple((shouldbespace, tag_no_case("TABLE"))))(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, what) = ident_raw(i)?;
+	let (i, what) = ident(i)?;
 	Ok((
 		i,
 		RemoveEventStatement {
@@ -508,14 +508,14 @@ fn event(i: &str) -> IResult<&str, RemoveEventStatement> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct RemoveFieldStatement {
-	pub name: String,
-	pub what: String,
+	pub name: Ident,
+	pub what: Ident,
 }
 
 impl RemoveFieldStatement {
 	pub(crate) async fn compute(
 		&self,
-		_ctx: &Runtime,
+		_ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		_doc: Option<&Value>,
@@ -545,12 +545,12 @@ fn field(i: &str) -> IResult<&str, RemoveFieldStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("FIELD")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("ON")(i)?;
 	let (i, _) = opt(tuple((shouldbespace, tag_no_case("TABLE"))))(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, what) = ident_raw(i)?;
+	let (i, what) = ident(i)?;
 	Ok((
 		i,
 		RemoveFieldStatement {
@@ -566,14 +566,14 @@ fn field(i: &str) -> IResult<&str, RemoveFieldStatement> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct RemoveIndexStatement {
-	pub name: String,
-	pub what: String,
+	pub name: Ident,
+	pub what: Ident,
 }
 
 impl RemoveIndexStatement {
 	pub(crate) async fn compute(
 		&self,
-		_ctx: &Runtime,
+		_ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		_doc: Option<&Value>,
@@ -606,12 +606,12 @@ fn index(i: &str) -> IResult<&str, RemoveIndexStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("INDEX")(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, name) = ident_raw(i)?;
+	let (i, name) = ident(i)?;
 	let (i, _) = shouldbespace(i)?;
 	let (i, _) = tag_no_case("ON")(i)?;
 	let (i, _) = opt(tuple((shouldbespace, tag_no_case("TABLE"))))(i)?;
 	let (i, _) = shouldbespace(i)?;
-	let (i, what) = ident_raw(i)?;
+	let (i, what) = ident(i)?;
 	Ok((
 		i,
 		RemoveIndexStatement {

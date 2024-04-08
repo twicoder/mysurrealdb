@@ -6,18 +6,13 @@ mod start;
 mod version;
 
 use clap::{Arg, Command};
+use once_cell::sync::Lazy;
+use rand::distributions::Alphanumeric;
+use rand::Rng;
 
-fn auth_valid(v: &str) -> Result<(), String> {
-	if v.contains(':') {
-		return Ok(());
-	}
-	Err(String::from(
-		"\
-		Provide a valid user:pass value separated by a colon, \
-		or use the --auth-user and --auth-pass flags\
-	",
-	))
-}
+static PASS: Lazy<String> = Lazy::new(|| {
+	rand::thread_rng().sample_iter(&Alphanumeric).take(128).map(char::from).collect::<String>()
+});
 
 fn file_valid(v: &str) -> Result<(), String> {
 	if !v.is_empty() {
@@ -138,33 +133,24 @@ pub fn init() {
 					.help("Database path used for storing data"),
 			)
 			.arg(
-				Arg::new("auth")
-					.short('a')
-					.long("auth")
-					.forbid_empty_values(true)
-					.validator(auth_valid)
-					.default_value("root:root")
-					.help("Master database authentication details"),
-			)
-			.arg(
-				Arg::new("auth-user")
+				Arg::new("user")
 					.short('u')
-					.long("auth-user")
+					.long("user")
 					.forbid_empty_values(true)
 					.default_value("root")
 					.help("The master username for the database"),
 			)
 			.arg(
-				Arg::new("auth-pass")
+				Arg::new("pass")
 					.short('p')
-					.long("auth-pass")
+					.long("pass")
 					.forbid_empty_values(true)
-					.default_value("root")
+					.default_value(PASS.as_str())
 					.help("The master password for the database"),
 			)
 			.arg(
-				Arg::new("auth-addr")
-					.long("auth-addr")
+				Arg::new("addr")
+					.long("addr")
 					.number_of_values(1)
 					.forbid_empty_values(true)
 					.multiple_occurrences(true)

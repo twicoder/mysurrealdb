@@ -3,22 +3,9 @@ use crate::sql::thing::Thing;
 use crate::sql::value::Value;
 use msgpack::encode::Error as SerdeError;
 use serde::Serialize;
-use std::time::Duration;
 use storekey::decode::Error as DecodeError;
 use storekey::encode::Error as EncodeError;
 use thiserror::Error;
-
-#[cfg(feature = "kv-tikv")]
-use tikv::Error as TiKVError;
-
-#[cfg(feature = "kv-echodb")]
-use echodb::err::Error as EchoDBError;
-
-#[cfg(feature = "kv-indxdb")]
-use indxdb::err::Error as IndxDBError;
-
-#[cfg(feature = "parallel")]
-use tokio::sync::mpsc::error::SendError as TokioError;
 
 /// An error originating from the SurrealDB client library.
 #[derive(Error, Debug)]
@@ -28,13 +15,13 @@ pub enum Error {
 	#[error("Conditional clause is not truthy")]
 	Ignore,
 
-	/// There was an error when connecting to the underlying datastore
-	#[error("Couldn't setup connection to underlying datastore")]
-	Ds,
+	/// There was a problem with the underlying datastore
+	#[error("There was a problem with the underlying datastore: {0}")]
+	Ds(String),
 
-	/// There was an error when starting a new transaction
-	#[error("Couldn't create a database transaction")]
-	Tx,
+	/// There was a problem with a datastore transaction
+	#[error("There was a problem with a datastore transaction: {0}")]
+	Tx(String),
 
 	/// The transaction was already cancelled or committed
 	#[error("Couldn't update a finished transaction")]
@@ -88,17 +75,15 @@ pub enum Error {
 	},
 
 	/// The query timedout
-	#[error("Query timeout of {timer:?} exceeded")]
-	QueryTimeout {
-		timer: Duration,
-	},
+	#[error("The query was not executed because it exceeded the timeout")]
+	QueryTimedout,
 
 	/// The query did not execute, because the transaction was cancelled
-	#[error("Query not executed due to cancelled transaction")]
+	#[error("The query was not executed due to a cancelled transaction")]
 	QueryCancelled,
 
 	/// The query did not execute, because the transaction has failed
-	#[error("Query not executed due to failed transaction")]
+	#[error("The query was not executed due to a failed transaction")]
 	QueryNotExecuted,
 
 	/// The permissions do not allow for performing the specified query
@@ -155,44 +140,41 @@ pub enum Error {
 
 	/// Too many recursive subqueries have been processed
 	#[error("Too many recursive subqueries have been processed")]
-	TooManySubqueries {
-		limit: usize,
-	},
+	TooManySubqueries,
 
 	/// Can not execute CREATE query using the specified value
 	#[error("Can not execute CREATE query using value '{value}'")]
 	CreateStatement {
-		value: Value,
+		value: String,
 	},
 
 	/// Can not execute UPDATE query using the specified value
 	#[error("Can not execute UPDATE query using value '{value}'")]
 	UpdateStatement {
-		value: Value,
+		value: String,
 	},
 
 	/// Can not execute RELATE query using the specified value
 	#[error("Can not execute RELATE query using value '{value}'")]
 	RelateStatement {
-		value: Value,
+		value: String,
 	},
 
 	/// Can not execute DELETE query using the specified value
 	#[error("Can not execute DELETE query using value '{value}'")]
 	DeleteStatement {
-		value: Value,
+		value: String,
 	},
 
 	/// Can not execute INSERT query using the specified value
 	#[error("Can not execute INSERT query using value '{value}'")]
 	InsertStatement {
-		value: Value,
+		value: String,
 	},
 
 	/// The permissions do not allow this query to be run on this table
-	#[error("You don't have permission to run the `{query}` query on the `{table}` table")]
+	#[error("You don't have permission to run this query on the `{table}` table")]
 	TablePermissions {
-		query: String,
 		table: String,
 	},
 
@@ -205,23 +187,27 @@ pub enum Error {
 	/// A database entry for the specified record already exists
 	#[error("Database record `{thing}` already exists")]
 	RecordExists {
-		thing: Thing,
+		thing: String,
 	},
 
 	/// A database index entry for the specified record already exists
 	#[error("Database index `{index}` already contains `{thing}`")]
 	IndexExists {
 		index: String,
-		thing: Thing,
+		thing: String,
 	},
 
 	/// The specified field did not conform to the field ASSERT clause
 	#[error("Found '{value}' for field '{field}' but field must conform to: {check}")]
 	FieldValue {
-		value: Value,
+		value: String,
 		field: Idiom,
-		check: Value,
+		check: String,
 	},
+
+	/// There was an error processing a value in parallel
+	#[error("There was an error processing a value in parallel")]
+	Channel(String),
 
 	/// Represents an underlying error with Serde encoding / decoding
 	#[error("Serde error: {0}")]
@@ -234,26 +220,51 @@ pub enum Error {
 	/// Represents an error when decoding a key-value entry
 	#[error("Key decoding error: {0}")]
 	Decode(#[from] DecodeError),
+}
 
-	/// Represents an underlying error from the EchoDB instance
-	#[cfg(feature = "kv-echodb")]
-	#[error("Datastore error: {0}")]
-	EchoDB(#[from] EchoDBError),
+impl From<Error> for String {
+	fn from(e: Error) -> String {
+		e.to_string()
+	}
+}
 
-	/// Represents an underlying error from the IndxDB instance
-	#[cfg(feature = "kv-indxdb")]
-	#[error("Datastore error: {0}")]
-	IndxDB(#[from] IndxDBError),
+#[cfg(feature = "kv-echodb")]
+impl From<echodb::err::Error> for Error {
+	fn from(e: echodb::err::Error) -> Error {
+		Error::Tx(e.to_string())
+	}
+}
 
-	/// Represents an underlying error from the TiKV instance
-	#[cfg(feature = "kv-tikv")]
-	#[error("Datastore error: {0}")]
-	TiKV(#[from] TiKVError),
+#[cfg(feature = "kv-indxdb")]
+impl From<indxdb::err::Error> for Error {
+	fn from(e: indxdb::err::Error) -> Error {
+		Error::Tx(e.to_string())
+	}
+}
 
-	/// Represents an underlying error with Tokio message channels
-	#[cfg(feature = "parallel")]
-	#[error("Tokio Error: {0}")]
-	Tokio(#[from] TokioError<(Option<Thing>, Value)>),
+#[cfg(feature = "kv-tikv")]
+impl From<tikv::Error> for Error {
+	fn from(e: tikv::Error) -> Error {
+		Error::Tx(e.to_string())
+	}
+}
+
+impl From<channel::RecvError> for Error {
+	fn from(e: channel::RecvError) -> Error {
+		Error::Channel(e.to_string())
+	}
+}
+
+impl From<channel::SendError<Vec<u8>>> for Error {
+	fn from(e: channel::SendError<Vec<u8>>) -> Error {
+		Error::Channel(e.to_string())
+	}
+}
+
+impl From<channel::SendError<(Option<Thing>, Value)>> for Error {
+	fn from(e: channel::SendError<(Option<Thing>, Value)>) -> Error {
+		Error::Channel(e.to_string())
+	}
 }
 
 impl Serialize for Error {

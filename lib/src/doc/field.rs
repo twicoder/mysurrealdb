@@ -1,6 +1,5 @@
 use crate::ctx::Context;
 use crate::dbs::Options;
-use crate::dbs::Runtime;
 use crate::dbs::Statement;
 use crate::dbs::Transaction;
 use crate::doc::Document;
@@ -11,10 +10,10 @@ use crate::sql::value::Value;
 impl<'a> Document<'a> {
 	pub async fn field(
 		&mut self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
-		_stm: &Statement,
+		_stm: &Statement<'_>,
 	) -> Result<(), Error> {
 		// Loop through all field statements
 		for fd in self.fd(opt, txn).await?.iter() {
@@ -28,10 +27,9 @@ impl<'a> Document<'a> {
 				if let Some(expr) = &fd.value {
 					// Configure the context
 					let mut ctx = Context::new(ctx);
-					ctx.add_value("value".into(), val.clone());
-					ctx.add_value("after".into(), val.clone());
-					ctx.add_value("before".into(), old.clone());
-					let ctx = ctx.freeze();
+					ctx.add_value("value".into(), &val);
+					ctx.add_value("after".into(), &val);
+					ctx.add_value("before".into(), &old);
 					// Process the VALUE clause
 					val = expr.compute(&ctx, opt, txn, Some(&self.current)).await?;
 				}
@@ -43,16 +41,15 @@ impl<'a> Document<'a> {
 				if let Some(expr) = &fd.assert {
 					// Configure the context
 					let mut ctx = Context::new(ctx);
-					ctx.add_value("value".into(), val.clone());
-					ctx.add_value("after".into(), val.clone());
-					ctx.add_value("before".into(), old.clone());
-					let ctx = ctx.freeze();
+					ctx.add_value("value".into(), &val);
+					ctx.add_value("after".into(), &val);
+					ctx.add_value("before".into(), &old);
 					// Process the ASSERT clause
 					if !expr.compute(&ctx, opt, txn, Some(&self.current)).await?.is_truthy() {
 						return Err(Error::FieldValue {
-							value: val.clone(),
+							value: val.to_string(),
 							field: fd.name.clone(),
-							check: expr.clone(),
+							check: expr.to_string(),
 						});
 					}
 				}
@@ -73,10 +70,9 @@ impl<'a> Document<'a> {
 						Permission::Specific(e) => {
 							// Configure the context
 							let mut ctx = Context::new(ctx);
-							ctx.add_value("value".into(), val.clone());
-							ctx.add_value("after".into(), val.clone());
-							ctx.add_value("before".into(), old.clone());
-							let ctx = ctx.freeze();
+							ctx.add_value("value".into(), &val);
+							ctx.add_value("after".into(), &val);
+							ctx.add_value("before".into(), &old);
 							// Process the PERMISSION clause
 							if !e.compute(&ctx, opt, txn, Some(&self.current)).await?.is_truthy() {
 								val = old

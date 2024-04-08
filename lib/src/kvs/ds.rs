@@ -9,12 +9,14 @@ use crate::dbs::Variables;
 use crate::err::Error;
 use crate::sql;
 use crate::sql::query::Query;
+use channel::Sender;
 
 /// The underlying datastore instance which stores the dataset.
 pub struct Datastore {
 	pub(super) inner: Inner,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(super) enum Inner {
 	#[cfg(feature = "kv-echodb")]
 	Mem(super::mem::Datastore),
@@ -104,6 +106,7 @@ impl Datastore {
 			_ => unreachable!(),
 		}
 	}
+
 	/// Create a new transaction on this datastore
 	pub async fn transaction(&self, write: bool, lock: bool) -> Result<Transaction, Error> {
 		match &self.inner {
@@ -137,6 +140,7 @@ impl Datastore {
 			}
 		}
 	}
+
 	/// Parse and execute an SQL query
 	pub async fn execute(
 		&self,
@@ -156,14 +160,13 @@ impl Datastore {
 		let ctx = vars.attach(ctx);
 		// Parse the SQL query text
 		let ast = sql::parse(txt)?;
-		// Freeze the context
-		let ctx = ctx.freeze();
 		// Process all statements
 		opt.auth = sess.au.clone();
 		opt.ns = sess.ns();
 		opt.db = sess.db();
 		exe.execute(ctx, opt, ast).await
 	}
+
 	/// Execute a pre-parsed SQL query
 	pub async fn process(
 		&self,
@@ -181,12 +184,20 @@ impl Datastore {
 		let ctx = sess.context(ctx);
 		// Store the query variables
 		let ctx = vars.attach(ctx);
-		// Freeze the context
-		let ctx = ctx.freeze();
 		// Process all statements
 		opt.auth = sess.au.clone();
 		opt.ns = sess.ns();
 		opt.db = sess.db();
 		exe.execute(ctx, opt, ast).await
+	}
+
+	/// Performs a full database export as SQL
+	pub async fn export(&self, ns: String, db: String, chn: Sender<Vec<u8>>) -> Result<(), Error> {
+		// Start a new transaction
+		let mut txn = self.transaction(false, false).await?;
+		// Process the export
+		txn.export(&ns, &db, chn).await?;
+		// Everythign ok
+		Ok(())
 	}
 }

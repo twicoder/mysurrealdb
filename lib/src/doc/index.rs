@@ -1,5 +1,5 @@
+use crate::ctx::Context;
 use crate::dbs::Options;
-use crate::dbs::Runtime;
 use crate::dbs::Statement;
 use crate::dbs::Transaction;
 use crate::doc::Document;
@@ -9,10 +9,10 @@ use crate::sql::array::Array;
 impl<'a> Document<'a> {
 	pub async fn index(
 		&self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
-		_stm: &Statement,
+		_stm: &Statement<'_>,
 	) -> Result<(), Error> {
 		// Check if forced
 		if !opt.force && !self.changed() {
@@ -58,8 +58,8 @@ impl<'a> Document<'a> {
 							let key = crate::key::index::new(opt.ns(), opt.db(), &ix.what, &ix.name, n);
 							if run.putc(key, rid, None).await.is_err() {
 								return Err(Error::IndexExists {
-									index: ix.name.to_owned(),
-									thing: rid.to_owned(),
+									index: ix.name.to_string(),
+									thing: rid.to_string(),
 								});
 							}
 						}
@@ -77,8 +77,8 @@ impl<'a> Document<'a> {
 							let key = crate::key::point::new(opt.ns(), opt.db(), &ix.what, &ix.name, n, &rid.id);
 							if run.putc(key, rid, None).await.is_err() {
 								return Err(Error::IndexExists {
-									index: ix.name.to_owned(),
-									thing: rid.to_owned(),
+									index: ix.name.to_string(),
+									thing: rid.to_string(),
 								});
 							}
 						}

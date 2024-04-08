@@ -1,5 +1,5 @@
+use crate::ctx::Context;
 use crate::dbs::Options;
-use crate::dbs::Runtime;
 use crate::dbs::Statement;
 use crate::dbs::Transaction;
 use crate::doc::Document;
@@ -9,10 +9,10 @@ use crate::sql::permission::Permission;
 impl<'a> Document<'a> {
 	pub async fn allow(
 		&self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
-		stm: &Statement,
+		stm: &Statement<'_>,
 	) -> Result<(), Error> {
 		// Check permission clause
 		if opt.perms && opt.auth.perms() && self.id.is_some() {

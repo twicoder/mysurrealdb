@@ -1,7 +1,7 @@
 #![allow(clippy::derive_ord_xor_partial_ord)]
 
+use crate::ctx::Context;
 use crate::dbs::Options;
-use crate::dbs::Runtime;
 use crate::dbs::Transaction;
 use crate::err::Error;
 use crate::sql::array::{array, Array};
@@ -766,7 +766,7 @@ impl Value {
 			Value::False => other.is_false(),
 			Value::Thing(v) => match other {
 				Value::Thing(w) => v == w,
-				Value::Regex(w) => match w.value {
+				Value::Regex(w) => match w.regex() {
 					Some(ref r) => r.is_match(v.to_string().as_str()),
 					None => false,
 				},
@@ -774,11 +774,11 @@ impl Value {
 			},
 			Value::Regex(v) => match other {
 				Value::Regex(w) => v == w,
-				Value::Number(w) => match v.value {
+				Value::Number(w) => match v.regex() {
 					Some(ref r) => r.is_match(w.to_string().as_str()),
 					None => false,
 				},
-				Value::Strand(w) => match v.value {
+				Value::Strand(w) => match v.regex() {
 					Some(ref r) => r.is_match(w.as_str()),
 					None => false,
 				},
@@ -794,7 +794,7 @@ impl Value {
 			},
 			Value::Strand(v) => match other {
 				Value::Strand(w) => v == w,
-				Value::Regex(w) => match w.value {
+				Value::Regex(w) => match w.regex() {
 					Some(ref r) => r.is_match(v.as_str()),
 					None => false,
 				},
@@ -803,7 +803,7 @@ impl Value {
 			Value::Number(v) => match other {
 				Value::Number(w) => v == w,
 				Value::Strand(_) => v == &other.to_number(),
-				Value::Regex(w) => match w.value {
+				Value::Regex(w) => match w.regex() {
 					Some(ref r) => r.is_match(v.to_string().as_str()),
 					None => false,
 				},
@@ -967,11 +967,22 @@ impl fmt::Display for Value {
 }
 
 impl Value {
+	pub(crate) fn writeable(&self) -> bool {
+		match self {
+			Value::Array(v) => v.iter().any(|v| v.writeable()),
+			Value::Object(v) => v.iter().any(|(_, v)| v.writeable()),
+			Value::Function(v) => v.args().iter().any(|v| v.writeable()),
+			Value::Subquery(v) => v.writeable(),
+			Value::Expression(v) => v.l.writeable() || v.r.writeable(),
+			_ => false,
+		}
+	}
+
 	#[cfg_attr(feature = "parallel", async_recursion)]
 	#[cfg_attr(not(feature = "parallel"), async_recursion(?Send))]
 	pub(crate) async fn compute(
 		&self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		doc: Option<&'async_recursion Value>,
@@ -1331,6 +1342,28 @@ mod tests {
 		assert_eq!(String::from("true"), Value::from("true").as_string());
 		assert_eq!(String::from("false"), Value::from("false").as_string());
 		assert_eq!(String::from("something"), Value::from("something").as_string());
+	}
+
+	#[test]
+	fn check_size() {
+		assert_eq!(88, std::mem::size_of::<Value>());
+		assert_eq!(48, std::mem::size_of::<crate::sql::number::Number>());
+		assert_eq!(24, std::mem::size_of::<crate::sql::strand::Strand>());
+		assert_eq!(16, std::mem::size_of::<crate::sql::duration::Duration>());
+		assert_eq!(12, std::mem::size_of::<crate::sql::datetime::Datetime>());
+		assert_eq!(24, std::mem::size_of::<crate::sql::array::Array>());
+		assert_eq!(24, std::mem::size_of::<crate::sql::object::Object>());
+		assert_eq!(56, std::mem::size_of::<crate::sql::geometry::Geometry>());
+		assert_eq!(24, std::mem::size_of::<crate::sql::param::Param>());
+		assert_eq!(24, std::mem::size_of::<crate::sql::idiom::Idiom>());
+		assert_eq!(24, std::mem::size_of::<crate::sql::table::Table>());
+		assert_eq!(80, std::mem::size_of::<crate::sql::thing::Thing>());
+		assert_eq!(48, std::mem::size_of::<crate::sql::model::Model>());
+		assert_eq!(24, std::mem::size_of::<crate::sql::regex::Regex>());
+		assert_eq!(8, std::mem::size_of::<Box<crate::sql::function::Function>>());
+		assert_eq!(8, std::mem::size_of::<Box<crate::sql::subquery::Subquery>>());
+		assert_eq!(8, std::mem::size_of::<Box<crate::sql::expression::Expression>>());
+		assert_eq!(96, std::mem::size_of::<Result<Value, Error>>());
 	}
 
 	#[test]

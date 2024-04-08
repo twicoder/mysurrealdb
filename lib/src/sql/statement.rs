@@ -1,5 +1,5 @@
+use crate::ctx::Context;
 use crate::dbs::Options;
-use crate::dbs::Runtime;
 use crate::dbs::Transaction;
 use crate::err::Error;
 use crate::sql::comment::{comment, mightbespace};
@@ -33,7 +33,6 @@ use nom::sequence::delimited;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::Deref;
-use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -60,25 +59,25 @@ pub fn statements(i: &str) -> IResult<&str, Statements> {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Statement {
-	Set(Arc<SetStatement>),
-	Use(Arc<UseStatement>),
-	Info(Arc<InfoStatement>),
-	Live(Arc<LiveStatement>),
-	Kill(Arc<KillStatement>),
-	Begin(Arc<BeginStatement>),
-	Cancel(Arc<CancelStatement>),
-	Commit(Arc<CommitStatement>),
-	Output(Arc<OutputStatement>),
-	Ifelse(Arc<IfelseStatement>),
-	Select(Arc<SelectStatement>),
-	Create(Arc<CreateStatement>),
-	Update(Arc<UpdateStatement>),
-	Relate(Arc<RelateStatement>),
-	Delete(Arc<DeleteStatement>),
-	Insert(Arc<InsertStatement>),
-	Define(Arc<DefineStatement>),
-	Remove(Arc<RemoveStatement>),
-	Option(Arc<OptionStatement>),
+	Use(UseStatement),
+	Set(SetStatement),
+	Info(InfoStatement),
+	Live(LiveStatement),
+	Kill(KillStatement),
+	Begin(BeginStatement),
+	Cancel(CancelStatement),
+	Commit(CommitStatement),
+	Output(OutputStatement),
+	Ifelse(IfelseStatement),
+	Select(SelectStatement),
+	Create(CreateStatement),
+	Update(UpdateStatement),
+	Relate(RelateStatement),
+	Delete(DeleteStatement),
+	Insert(InsertStatement),
+	Define(DefineStatement),
+	Remove(RemoveStatement),
+	Option(OptionStatement),
 }
 
 impl Statement {
@@ -93,12 +92,32 @@ impl Statement {
 			_ => None,
 		}
 	}
-}
 
-impl Statement {
+	pub(crate) fn writeable(&self) -> bool {
+		match self {
+			Statement::Use(_) => false,
+			Statement::Set(v) => v.writeable(),
+			Statement::Info(_) => false,
+			Statement::Live(_) => true,
+			Statement::Kill(_) => true,
+			Statement::Output(v) => v.writeable(),
+			Statement::Ifelse(v) => v.writeable(),
+			Statement::Select(v) => v.writeable(),
+			Statement::Create(v) => v.writeable(),
+			Statement::Update(v) => v.writeable(),
+			Statement::Relate(v) => v.writeable(),
+			Statement::Delete(v) => v.writeable(),
+			Statement::Insert(v) => v.writeable(),
+			Statement::Define(_) => true,
+			Statement::Remove(_) => true,
+			Statement::Option(_) => false,
+			_ => unreachable!(),
+		}
+	}
+
 	pub(crate) async fn compute(
 		&self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		doc: Option<&Value>,
@@ -153,25 +172,25 @@ pub fn statement(i: &str) -> IResult<&str, Statement> {
 	delimited(
 		mightbespace,
 		alt((
-			map(set, |v| Statement::Set(Arc::new(v))),
-			map(yuse, |v| Statement::Use(Arc::new(v))),
-			map(info, |v| Statement::Info(Arc::new(v))),
-			map(live, |v| Statement::Live(Arc::new(v))),
-			map(kill, |v| Statement::Kill(Arc::new(v))),
-			map(begin, |v| Statement::Begin(Arc::new(v))),
-			map(cancel, |v| Statement::Cancel(Arc::new(v))),
-			map(commit, |v| Statement::Commit(Arc::new(v))),
-			map(output, |v| Statement::Output(Arc::new(v))),
-			map(ifelse, |v| Statement::Ifelse(Arc::new(v))),
-			map(select, |v| Statement::Select(Arc::new(v))),
-			map(create, |v| Statement::Create(Arc::new(v))),
-			map(update, |v| Statement::Update(Arc::new(v))),
-			map(relate, |v| Statement::Relate(Arc::new(v))),
-			map(delete, |v| Statement::Delete(Arc::new(v))),
-			map(insert, |v| Statement::Insert(Arc::new(v))),
-			map(define, |v| Statement::Define(Arc::new(v))),
-			map(remove, |v| Statement::Remove(Arc::new(v))),
-			map(option, |v| Statement::Option(Arc::new(v))),
+			map(set, Statement::Set),
+			map(yuse, Statement::Use),
+			map(info, Statement::Info),
+			map(live, Statement::Live),
+			map(kill, Statement::Kill),
+			map(begin, Statement::Begin),
+			map(cancel, Statement::Cancel),
+			map(commit, Statement::Commit),
+			map(output, Statement::Output),
+			map(ifelse, Statement::Ifelse),
+			map(select, Statement::Select),
+			map(create, Statement::Create),
+			map(update, Statement::Update),
+			map(relate, Statement::Relate),
+			map(delete, Statement::Delete),
+			map(insert, Statement::Insert),
+			map(define, Statement::Define),
+			map(remove, Statement::Remove),
+			map(option, Statement::Option),
 		)),
 		mightbespace,
 	)(i)

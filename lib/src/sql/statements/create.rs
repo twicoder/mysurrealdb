@@ -1,7 +1,8 @@
+use crate::ctx::Context;
 use crate::dbs::Iterator;
 use crate::dbs::Level;
 use crate::dbs::Options;
-use crate::dbs::Runtime;
+use crate::dbs::Statement;
 use crate::dbs::Transaction;
 use crate::err::Error;
 use crate::sql::comment::shouldbespace;
@@ -16,7 +17,6 @@ use nom::combinator::opt;
 use nom::sequence::preceded;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct CreateStatement {
@@ -28,19 +28,21 @@ pub struct CreateStatement {
 }
 
 impl CreateStatement {
+	pub(crate) fn writeable(&self) -> bool {
+		true
+	}
+
 	pub(crate) async fn compute(
-		self: &Arc<Self>,
-		ctx: &Runtime,
+		&self,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		doc: Option<&Value>,
 	) -> Result<Value, Error> {
 		// Allowed to run?
 		opt.check(Level::No)?;
-		// Clone the statement
-		let s = Arc::clone(self);
 		// Create a new iterator
-		let mut i = Iterator::from(s);
+		let mut i = Iterator::new();
 		// Ensure futures are stored
 		let opt = &opt.futures(false);
 		// Loop over the create targets
@@ -53,13 +55,15 @@ impl CreateStatement {
 				Value::Array(_) => i.prepare(v),
 				v => {
 					return Err(Error::CreateStatement {
-						value: v,
+						value: v.to_string(),
 					})
 				}
 			};
 		}
+		// Assign the statement
+		let stm = Statement::from(self);
 		// Output the results
-		i.output(ctx, opt, txn).await
+		i.output(ctx, opt, txn, &stm).await
 	}
 }
 

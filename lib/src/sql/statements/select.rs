@@ -1,14 +1,15 @@
+use crate::ctx::Context;
 use crate::dbs::Iterator;
 use crate::dbs::Level;
 use crate::dbs::Options;
-use crate::dbs::Runtime;
+use crate::dbs::Statement;
 use crate::dbs::Transaction;
 use crate::err::Error;
 use crate::sql::comment::shouldbespace;
 use crate::sql::cond::{cond, Cond};
 use crate::sql::error::IResult;
 use crate::sql::fetch::{fetch, Fetchs};
-use crate::sql::field::{fields, Fields};
+use crate::sql::field::{fields, Field, Fields};
 use crate::sql::group::{group, Groups};
 use crate::sql::limit::{limit, Limit};
 use crate::sql::order::{order, Orders};
@@ -23,7 +24,6 @@ use nom::combinator::opt;
 use nom::sequence::preceded;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Store)]
 pub struct SelectStatement {
@@ -42,34 +42,47 @@ pub struct SelectStatement {
 }
 
 impl SelectStatement {
+	/// Return the statement limit number or 0 if not set
 	pub fn limit(&self) -> usize {
 		match self.limit {
 			Some(Limit(v)) => v,
 			None => 0,
 		}
 	}
+
+	/// Return the statement start number or 0 if not set
 	pub fn start(&self) -> usize {
 		match self.start {
 			Some(Start(v)) => v,
 			None => 0,
 		}
 	}
-}
 
-impl SelectStatement {
+	pub(crate) fn writeable(&self) -> bool {
+		if self.expr.iter().any(|v| match v {
+			Field::All => false,
+			Field::Alone(v) => v.writeable(),
+			Field::Alias(v, _) => v.writeable(),
+		}) {
+			return true;
+		}
+		if self.what.iter().any(|v| v.writeable()) {
+			return true;
+		}
+		self.cond.as_ref().map_or(false, |v| v.writeable())
+	}
+
 	pub(crate) async fn compute(
-		self: &Arc<Self>,
-		ctx: &Runtime,
+		&self,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		doc: Option<&Value>,
 	) -> Result<Value, Error> {
 		// Allowed to run?
 		opt.check(Level::No)?;
-		// Clone the statement
-		let s = Arc::clone(self);
 		// Create a new iterator
-		let mut i = Iterator::from(s);
+		let mut i = Iterator::new();
 		// Ensure futures are processed
 		let opt = &opt.futures(true);
 		// Loop over the select targets
@@ -83,8 +96,10 @@ impl SelectStatement {
 				v => i.prepare(v),
 			};
 		}
+		// Assign the statement
+		let stm = Statement::from(self);
 		// Output the results
-		i.output(ctx, opt, txn).await
+		i.output(ctx, opt, txn, &stm).await
 	}
 }
 

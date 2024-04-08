@@ -1,5 +1,5 @@
+use crate::ctx::Context;
 use crate::dbs::Options;
-use crate::dbs::Runtime;
 use crate::dbs::Transaction;
 use crate::err::Error;
 use crate::sql::comment::shouldbespace;
@@ -19,9 +19,18 @@ pub struct IfelseStatement {
 }
 
 impl IfelseStatement {
+	pub(crate) fn writeable(&self) -> bool {
+		for (cond, then) in self.exprs.iter() {
+			if cond.writeable() || then.writeable() {
+				return true;
+			}
+		}
+		self.close.as_ref().map_or(false, |v| v.writeable())
+	}
+
 	pub(crate) async fn compute(
 		&self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
 		doc: Option<&Value>,

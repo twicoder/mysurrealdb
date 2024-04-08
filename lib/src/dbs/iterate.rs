@@ -1,6 +1,7 @@
+use crate::ctx::Context;
 use crate::dbs::Iterator;
 use crate::dbs::Options;
-use crate::dbs::Runtime;
+use crate::dbs::Statement;
 use crate::dbs::Transaction;
 use crate::err::Error;
 use crate::key::thing;
@@ -17,18 +18,19 @@ impl Value {
 	#[cfg_attr(not(feature = "parallel"), async_recursion(?Send))]
 	pub(crate) async fn iterate(
 		self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
+		stm: &Statement<'_>,
 		ite: &mut Iterator,
 	) -> Result<(), Error> {
 		if ctx.is_ok() {
 			match self {
-				Value::Array(v) => v.iterate(ctx, opt, txn, ite).await?,
-				Value::Model(v) => v.iterate(ctx, opt, txn, ite).await?,
-				Value::Thing(v) => v.iterate(ctx, opt, txn, ite).await?,
-				Value::Table(v) => v.iterate(ctx, opt, txn, ite).await?,
-				v => ite.process(ctx, opt, txn, None, v).await,
+				Value::Array(v) => v.iterate(ctx, opt, txn, stm, ite).await?,
+				Value::Model(v) => v.iterate(ctx, opt, txn, stm, ite).await?,
+				Value::Thing(v) => v.iterate(ctx, opt, txn, stm, ite).await?,
+				Value::Table(v) => v.iterate(ctx, opt, txn, stm, ite).await?,
+				v => ite.process(ctx, opt, txn, stm, None, v).await,
 			}
 		}
 		Ok(())
@@ -40,19 +42,20 @@ impl Array {
 	#[cfg_attr(not(feature = "parallel"), async_recursion(?Send))]
 	pub(crate) async fn iterate(
 		self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
+		stm: &Statement<'_>,
 		ite: &mut Iterator,
 	) -> Result<(), Error> {
 		for v in self.into_iter() {
 			if ctx.is_ok() {
 				match v {
-					Value::Array(v) => v.iterate(ctx, opt, txn, ite).await?,
-					Value::Model(v) => v.iterate(ctx, opt, txn, ite).await?,
-					Value::Thing(v) => v.iterate(ctx, opt, txn, ite).await?,
-					Value::Table(v) => v.iterate(ctx, opt, txn, ite).await?,
-					v => ite.process(ctx, opt, txn, None, v).await,
+					Value::Array(v) => v.iterate(ctx, opt, txn, stm, ite).await?,
+					Value::Model(v) => v.iterate(ctx, opt, txn, stm, ite).await?,
+					Value::Thing(v) => v.iterate(ctx, opt, txn, stm, ite).await?,
+					Value::Table(v) => v.iterate(ctx, opt, txn, stm, ite).await?,
+					v => ite.process(ctx, opt, txn, stm, None, v).await,
 				}
 			}
 		}
@@ -63,30 +66,33 @@ impl Array {
 impl Model {
 	pub(crate) async fn iterate(
 		self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
+		stm: &Statement<'_>,
 		ite: &mut Iterator,
 	) -> Result<(), Error> {
 		if ctx.is_ok() {
-			if let Some(c) = self.count {
-				for _ in 0..c {
-					Thing {
-						tb: self.table.to_string(),
-						id: Id::rand(),
+			match self {
+				Model::Count(tb, c) => {
+					for _ in 0..c {
+						Thing {
+							tb: tb.to_string(),
+							id: Id::rand(),
+						}
+						.iterate(ctx, opt, txn, stm, ite)
+						.await?;
 					}
-					.iterate(ctx, opt, txn, ite)
-					.await?;
 				}
-			}
-			if let Some(r) = self.range {
-				for x in r.0..=r.1 {
-					Thing {
-						tb: self.table.to_string(),
-						id: Id::from(x),
+				Model::Range(tb, b, e) => {
+					for x in b..=e {
+						Thing {
+							tb: tb.to_string(),
+							id: Id::from(x),
+						}
+						.iterate(ctx, opt, txn, stm, ite)
+						.await?;
 					}
-					.iterate(ctx, opt, txn, ite)
-					.await?;
 				}
 			}
 		}
@@ -97,9 +103,10 @@ impl Model {
 impl Thing {
 	pub(crate) async fn iterate(
 		self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
+		stm: &Statement<'_>,
 		ite: &mut Iterator,
 	) -> Result<(), Error> {
 		if ctx.is_ok() {
@@ -109,7 +116,7 @@ impl Thing {
 				Some(v) => Value::from(v),
 				None => Value::None,
 			};
-			ite.process(ctx, opt, txn, Some(self), val).await;
+			ite.process(ctx, opt, txn, stm, Some(self), val).await;
 		}
 		Ok(())
 	}
@@ -118,9 +125,10 @@ impl Thing {
 impl Table {
 	pub(crate) async fn iterate(
 		self,
-		ctx: &Runtime,
+		ctx: &Context<'_>,
 		opt: &Options,
 		txn: &Transaction,
+		stm: &Statement<'_>,
 		ite: &mut Iterator,
 	) -> Result<(), Error> {
 		if ctx.is_ok() {
@@ -161,7 +169,7 @@ impl Table {
 								let v: crate::sql::value::Value = (&v).into();
 								let t = Thing::from((k.tb, k.id));
 								// Process the record
-								ite.process(ctx, opt, txn, Some(t), v).await;
+								ite.process(ctx, opt, txn, stm, Some(t), v).await;
 							}
 						}
 						continue;

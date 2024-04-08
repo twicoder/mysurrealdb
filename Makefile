@@ -19,11 +19,11 @@ check:
 
 .PHONY: clean
 clean:
-	cargo clean --workspace
+	cargo clean
 
 .PHONY: serve
 serve:
-	cargo run -- -vvv start memory
+	cargo run -- -vvv start memory --user root --pass root
 
 .PHONY: quick
 quick:
