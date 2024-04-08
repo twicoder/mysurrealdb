@@ -2,6 +2,7 @@
 
 use crate::ctx::Context;
 use crate::dbs::Options;
+use crate::dbs::Response;
 use crate::dbs::Transaction;
 use crate::err::Error;
 use crate::sql::array::{array, Array};
@@ -28,6 +29,7 @@ use crate::sql::strand::{strand, Strand};
 use crate::sql::subquery::{subquery, Subquery};
 use crate::sql::table::{table, Table};
 use crate::sql::thing::{thing, Thing};
+use crate::sql::uuid::{uuid as unique, Uuid};
 use async_recursion::async_recursion;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
@@ -45,6 +47,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt;
+use std::iter::FromIterator;
 use std::ops;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -101,6 +104,7 @@ pub enum Value {
 	Strand(Strand),
 	Duration(Duration),
 	Datetime(Datetime),
+	Uuid(Uuid),
 	Array(Array),
 	Object(Object),
 	Geometry(Geometry),
@@ -137,6 +141,12 @@ impl From<bool> for Value {
 			true => Value::True,
 			false => Value::False,
 		}
+	}
+}
+
+impl From<Uuid> for Value {
+	fn from(v: Uuid) -> Self {
+		Value::Uuid(v)
 	}
 }
 
@@ -362,7 +372,7 @@ impl From<Operation> for Value {
 	}
 }
 
-impl<'a> From<Vec<&str>> for Value {
+impl From<Vec<&str>> for Value {
 	fn from(v: Vec<&str>) -> Self {
 		Value::Array(Array::from(v))
 	}
@@ -422,6 +432,16 @@ impl From<Id> for Value {
 			Id::Number(v) => v.into(),
 			Id::String(v) => Strand::from(v).into(),
 		}
+	}
+}
+
+impl FromIterator<Response> for Vec<Value> {
+	fn from_iter<I: IntoIterator<Item = Response>>(iter: I) -> Self {
+		let mut c: Vec<Value> = vec![];
+		for i in iter {
+			c.push(i.into())
+		}
+		c
 	}
 }
 
@@ -500,6 +520,26 @@ impl Value {
 			Value::Datetime(v) => v.timestamp() > 0,
 			_ => false,
 		}
+	}
+
+	pub fn is_uuid(&self) -> bool {
+		matches!(self, Value::Uuid(_))
+	}
+
+	pub fn is_thing(&self) -> bool {
+		matches!(self, Value::Thing(_))
+	}
+
+	pub fn is_strand(&self) -> bool {
+		matches!(self, Value::Strand(_))
+	}
+
+	pub fn is_array(&self) -> bool {
+		matches!(self, Value::Array(_))
+	}
+
+	pub fn is_object(&self) -> bool {
+		matches!(self, Value::Object(_))
 	}
 
 	pub fn is_type_record(&self, types: &[Table]) -> bool {
@@ -660,11 +700,28 @@ impl Value {
 			Value::Datetime(v) => v.0.to_string().into(),
 			Value::Function(v) => match v.as_ref() {
 				Function::Future(_) => "fn::future".to_string().into(),
-				Function::Script(_) => "fn::script".to_string().into(),
+				Function::Script(_, _) => "fn::script".to_string().into(),
 				Function::Normal(f, _) => f.to_string().into(),
 				Function::Cast(_, v) => v.to_idiom(),
 			},
 			_ => self.to_string().into(),
+		}
+	}
+
+	pub fn to_operations(&self) -> Result<Vec<Operation>, Error> {
+		match self {
+			Value::Array(v) => v
+				.iter()
+				.map(|v| match v {
+					Value::Object(v) => v.to_operation(),
+					_ => Err(Error::InvalidPatch {
+						message: String::from("Operation must be an object"),
+					}),
+				})
+				.collect::<Result<Vec<_>, Error>>(),
+			_ => Err(Error::InvalidPatch {
+				message: String::from("Operations must be an array"),
+			}),
 		}
 	}
 
@@ -728,6 +785,23 @@ impl Value {
 		}
 	}
 
+	pub fn make_table(self) -> Value {
+		match self {
+			Value::Table(_) => self,
+			Value::Strand(v) => Value::Table(Table(v.0)),
+			_ => Value::Table(Table(self.as_strand().0)),
+		}
+	}
+
+	pub fn make_table_or_thing(self) -> Value {
+		match self {
+			Value::Table(_) => self,
+			Value::Thing(_) => self,
+			Value::Strand(v) => Value::Table(Table(v.0)),
+			_ => Value::Table(Table(self.as_strand().0)),
+		}
+	}
+
 	pub fn convert_to(self, kind: &Kind) -> Value {
 		match kind {
 			Kind::Any => self,
@@ -755,6 +829,26 @@ impl Value {
 				true => self,
 				_ => Value::None,
 			},
+		}
+	}
+
+	// -----------------------------------
+	// Record ID extraction
+	// -----------------------------------
+
+	/// Fetch the record id if there is one
+	pub fn rid(self) -> Option<Thing> {
+		match self {
+			Value::Object(mut v) => match v.remove("id") {
+				Some(Value::Thing(v)) => Some(v),
+				_ => None,
+			},
+			Value::Array(mut v) => match v.len() {
+				1 => v.remove(0).rid(),
+				_ => None,
+			},
+			Value::Thing(v) => Some(v),
+			_ => None,
 		}
 	}
 
@@ -801,6 +895,10 @@ impl Value {
 					Some(ref r) => r.is_match(w.as_str()),
 					None => false,
 				},
+				_ => false,
+			},
+			Value::Uuid(v) => match other {
+				Value::Uuid(w) => v == w,
 				_ => false,
 			},
 			Value::Array(v) => match other {
@@ -969,6 +1067,7 @@ impl fmt::Display for Value {
 			Value::Strand(v) => write!(f, "{}", v),
 			Value::Duration(v) => write!(f, "{}", v),
 			Value::Datetime(v) => write!(f, "{}", v),
+			Value::Uuid(v) => write!(f, "{}", v),
 			Value::Array(v) => write!(f, "{}", v),
 			Value::Object(v) => write!(f, "{}", v),
 			Value::Geometry(v) => write!(f, "{}", v),
@@ -1041,19 +1140,20 @@ impl Serialize for Value {
 				Value::Strand(v) => s.serialize_newtype_variant("Value", 6, "Strand", v),
 				Value::Duration(v) => s.serialize_newtype_variant("Value", 7, "Duration", v),
 				Value::Datetime(v) => s.serialize_newtype_variant("Value", 8, "Datetime", v),
-				Value::Array(v) => s.serialize_newtype_variant("Value", 9, "Array", v),
-				Value::Object(v) => s.serialize_newtype_variant("Value", 10, "Object", v),
-				Value::Geometry(v) => s.serialize_newtype_variant("Value", 11, "Geometry", v),
-				Value::Param(v) => s.serialize_newtype_variant("Value", 12, "Param", v),
-				Value::Idiom(v) => s.serialize_newtype_variant("Value", 13, "Idiom", v),
-				Value::Table(v) => s.serialize_newtype_variant("Value", 14, "Table", v),
-				Value::Thing(v) => s.serialize_newtype_variant("Value", 15, "Thing", v),
-				Value::Model(v) => s.serialize_newtype_variant("Value", 16, "Model", v),
-				Value::Regex(v) => s.serialize_newtype_variant("Value", 17, "Regex", v),
-				Value::Edges(v) => s.serialize_newtype_variant("Value", 18, "Edges", v),
-				Value::Function(v) => s.serialize_newtype_variant("Value", 19, "Function", v),
-				Value::Subquery(v) => s.serialize_newtype_variant("Value", 20, "Subquery", v),
-				Value::Expression(v) => s.serialize_newtype_variant("Value", 21, "Expression", v),
+				Value::Uuid(v) => s.serialize_newtype_variant("Value", 9, "Uuid", v),
+				Value::Array(v) => s.serialize_newtype_variant("Value", 10, "Array", v),
+				Value::Object(v) => s.serialize_newtype_variant("Value", 11, "Object", v),
+				Value::Geometry(v) => s.serialize_newtype_variant("Value", 12, "Geometry", v),
+				Value::Param(v) => s.serialize_newtype_variant("Value", 13, "Param", v),
+				Value::Idiom(v) => s.serialize_newtype_variant("Value", 14, "Idiom", v),
+				Value::Table(v) => s.serialize_newtype_variant("Value", 15, "Table", v),
+				Value::Thing(v) => s.serialize_newtype_variant("Value", 16, "Thing", v),
+				Value::Model(v) => s.serialize_newtype_variant("Value", 17, "Model", v),
+				Value::Regex(v) => s.serialize_newtype_variant("Value", 18, "Regex", v),
+				Value::Edges(v) => s.serialize_newtype_variant("Value", 19, "Edges", v),
+				Value::Function(v) => s.serialize_newtype_variant("Value", 20, "Function", v),
+				Value::Subquery(v) => s.serialize_newtype_variant("Value", 21, "Subquery", v),
+				Value::Expression(v) => s.serialize_newtype_variant("Value", 22, "Expression", v),
 			}
 		} else {
 			match self {
@@ -1063,6 +1163,7 @@ impl Serialize for Value {
 				Value::True => s.serialize_bool(true),
 				Value::False => s.serialize_bool(false),
 				Value::Thing(v) => s.serialize_some(v),
+				Value::Uuid(v) => s.serialize_some(v),
 				Value::Array(v) => s.serialize_some(v),
 				Value::Object(v) => s.serialize_some(v),
 				Value::Number(v) => s.serialize_some(v),
@@ -1144,8 +1245,8 @@ pub fn single(i: &str) -> IResult<&str, Value> {
 		map(datetime, Value::from),
 		map(duration, Value::from),
 		map(geometry, Value::from),
+		map(unique, Value::from),
 		map(number, Value::from),
-		map(strand, Value::from),
 		map(object, Value::from),
 		map(array, Value::from),
 		map(param, Value::from),
@@ -1153,6 +1254,7 @@ pub fn single(i: &str) -> IResult<&str, Value> {
 		map(model, Value::from),
 		map(idiom, Value::from),
 		map(thing, Value::from),
+		map(strand, Value::from),
 	))(i)
 }
 
@@ -1168,8 +1270,8 @@ pub fn select(i: &str) -> IResult<&str, Value> {
 		map(datetime, Value::from),
 		map(duration, Value::from),
 		map(geometry, Value::from),
+		map(unique, Value::from),
 		map(number, Value::from),
-		map(strand, Value::from),
 		map(object, Value::from),
 		map(array, Value::from),
 		map(param, Value::from),
@@ -1178,6 +1280,7 @@ pub fn select(i: &str) -> IResult<&str, Value> {
 		map(edges, Value::from),
 		map(thing, Value::from),
 		map(table, Value::from),
+		map(strand, Value::from),
 	))(i)
 }
 
@@ -1201,9 +1304,11 @@ pub fn json(i: &str) -> IResult<&str, Value> {
 		map(datetime, Value::from),
 		map(duration, Value::from),
 		map(geometry, Value::from),
+		map(unique, Value::from),
 		map(number, Value::from),
 		map(object, Value::from),
 		map(array, Value::from),
+		map(thing, Value::from),
 		map(strand, Value::from),
 	))(i)
 }

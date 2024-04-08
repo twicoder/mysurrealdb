@@ -1,3 +1,4 @@
+use crate::dbs::Level;
 use crate::dbs::Options;
 use crate::dbs::Transaction;
 use crate::dbs::Workable;
@@ -39,6 +40,10 @@ impl<'a> Document<'a> {
 	pub fn changed(&self) -> bool {
 		self.initial != self.current
 	}
+	// Check if document has changed
+	pub fn is_new(&self) -> bool {
+		self.initial.is_none()
+	}
 	// Get the table for this document
 	pub async fn tb(
 		&self,
@@ -48,7 +53,15 @@ impl<'a> Document<'a> {
 		// Get the record id
 		let id = self.id.as_ref().unwrap();
 		// Get the table definition
-		txn.clone().lock().await.get_tb(opt.ns(), opt.db(), &id.tb).await
+		let tb = txn.clone().lock().await.get_tb(opt.ns(), opt.db(), &id.tb).await;
+		// Return the table or attempt to define it
+		match tb {
+			Ok(tb) => Ok(tb),
+			Err(e) => match opt.auth.check(Level::Db) {
+				true => txn.clone().lock().await.add_tb(opt.ns(), opt.db(), &id.tb).await,
+				false => Err(e),
+			},
+		}
 	}
 	// Get the events for this document
 	pub async fn ev(

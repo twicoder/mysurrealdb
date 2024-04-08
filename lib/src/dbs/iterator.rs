@@ -12,6 +12,7 @@ use crate::sql::part::Part;
 use crate::sql::table::Table;
 use crate::sql::thing::Thing;
 use crate::sql::value::Value;
+use async_recursion::async_recursion;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::mem;
@@ -307,7 +308,7 @@ impl Iterator {
 					match val {
 						Value::Array(v) => {
 							// Fetch all remote records
-							let val = Value::Array(v).get(ctx, opt, txn, &[Part::All]).await?;
+							let val = Value::Array(v).get(ctx, opt, txn, &[Part::Any]).await?;
 							// Set the value at the path
 							obj.set(ctx, opt, txn, fetch, val).await?;
 						}
@@ -328,7 +329,9 @@ impl Iterator {
 		Ok(())
 	}
 
-	#[cfg(not(feature = "parallel"))]
+	#[cfg(any(target_arch = "wasm32", not(feature = "parallel")))]
+	#[cfg_attr(feature = "parallel", async_recursion)]
+	#[cfg_attr(not(feature = "parallel"), async_recursion(?Send))]
 	async fn iterate(
 		&mut self,
 		ctx: &Context<'_>,
@@ -344,7 +347,9 @@ impl Iterator {
 		Ok(())
 	}
 
-	#[cfg(feature = "parallel")]
+	#[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
+	#[cfg_attr(feature = "parallel", async_recursion)]
+	#[cfg_attr(not(feature = "parallel"), async_recursion(?Send))]
 	async fn iterate(
 		&mut self,
 		ctx: &Context<'_>,

@@ -53,6 +53,12 @@ impl Deref for Duration {
 	}
 }
 
+impl Duration {
+	pub fn to_raw(&self) -> String {
+		self.to_string()
+	}
+}
+
 impl fmt::Display for Duration {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		// Split up the duration
@@ -114,7 +120,7 @@ impl Serialize for Duration {
 		if is_internal_serialization() {
 			serializer.serialize_newtype_struct("Duration", &self.0)
 		} else {
-			serializer.serialize_some(&self.0)
+			serializer.serialize_some(&self.to_string())
 		}
 	}
 }
@@ -203,7 +209,7 @@ pub fn duration(i: &str) -> IResult<&str, Duration> {
 	Ok((i, v.iter().sum::<Duration>()))
 }
 
-pub fn duration_raw(i: &str) -> IResult<&str, Duration> {
+fn duration_raw(i: &str) -> IResult<&str, Duration> {
 	let (i, v) = part(i)?;
 	let (i, u) = unit(i)?;
 	Ok((

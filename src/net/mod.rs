@@ -1,4 +1,3 @@
-mod config;
 mod export;
 mod fail;
 mod head;
@@ -7,6 +6,7 @@ mod index;
 mod key;
 mod log;
 mod output;
+mod rpc;
 mod session;
 mod signin;
 mod signup;
@@ -15,26 +15,11 @@ mod status;
 mod sync;
 mod version;
 
+use crate::cli::CF;
 use crate::err::Error;
-use config::Config;
-use once_cell::sync::OnceCell;
-use surrealdb::Datastore;
 use warp::Filter;
 
-static DB: OnceCell<Datastore> = OnceCell::new();
-
-static CF: OnceCell<Config> = OnceCell::new();
-
-#[tokio::main]
-pub async fn init(matches: &clap::ArgMatches) -> Result<(), Error> {
-	// Parse the server config options
-	let cfg = config::parse(matches);
-	// Parse and setup the desired kv datastore
-	let dbs = Datastore::new(&cfg.path).await?;
-	// Store database instance
-	let _ = DB.set(dbs);
-	// Store config options
-	let _ = CF.set(cfg);
+pub async fn init() -> Result<(), Error> {
 	// Setup web routes
 	let net = index::config()
 		// Version endpoint
@@ -51,6 +36,8 @@ pub async fn init(matches: &clap::ArgMatches) -> Result<(), Error> {
 		.or(import::config())
 		// Backup endpoint
 		.or(sync::config())
+		// RPC query endpoint
+		.or(rpc::config())
 		// SQL query endpoint
 		.or(sql::config())
 		// API query endpoint

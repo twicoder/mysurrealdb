@@ -6,13 +6,11 @@ use crate::sql::edges::Edges;
 use crate::sql::field::{Field, Fields};
 use crate::sql::part::Next;
 use crate::sql::part::Part;
+use crate::sql::paths::ID;
 use crate::sql::statements::select::SelectStatement;
 use crate::sql::value::{Value, Values};
 use async_recursion::async_recursion;
 use futures::future::try_join_all;
-use once_cell::sync::Lazy;
-
-static ID: Lazy<[Part; 1]> = Lazy::new(|| [Part::from("id")]);
 
 impl Value {
 	#[cfg_attr(feature = "parallel", async_recursion)]
@@ -38,12 +36,17 @@ impl Value {
 						None => Ok(Value::None),
 					},
 					Part::All => self.get(ctx, opt, txn, path.next()).await,
+					Part::Any => self.get(ctx, opt, txn, path.next()).await,
 					_ => Ok(Value::None),
 				},
 				// Current path part is an array
 				Value::Array(v) => match p {
 					Part::All => {
 						let path = path.next();
+						let futs = v.iter().map(|v| v.get(ctx, opt, txn, path));
+						try_join_all(futs).await.map(|v| v.into())
+					}
+					Part::Any => {
 						let futs = v.iter().map(|v| v.get(ctx, opt, txn, path));
 						try_join_all(futs).await.map(|v| v.into())
 					}
@@ -132,7 +135,13 @@ impl Value {
 					}
 				}
 				// Ignore everything else
-				_ => Ok(Value::None),
+				_ => match p {
+					Part::Any => match path.len() {
+						1 => Ok(self.clone()),
+						_ => Ok(Value::None),
+					},
+					_ => Ok(Value::None),
+				},
 			},
 			// No more parts so get the value
 			None => Ok(self.clone()),
