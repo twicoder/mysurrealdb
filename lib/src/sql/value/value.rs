@@ -105,8 +105,8 @@ pub enum Value {
 	True,
 	Number(Number),
 	Strand(Strand),
-	Datetime(Datetime),
 	Duration(Duration),
+	Datetime(Datetime),
 	Array(Array),
 	Object(Object),
 	Geometry(Geometry),
@@ -307,6 +307,12 @@ impl From<f64> for Value {
 	}
 }
 
+impl From<BigDecimal> for Value {
+	fn from(v: BigDecimal) -> Self {
+		Value::Number(Number::from(v))
+	}
+}
+
 impl From<String> for Value {
 	fn from(v: String) -> Self {
 		Value::Strand(Strand::from(v))
@@ -501,6 +507,40 @@ impl Value {
 		}
 	}
 
+	pub fn is_type_record(&self, types: &[Table]) -> bool {
+		match self {
+			Value::Thing(v) => types.iter().any(|t| t.name == v.tb),
+			_ => false,
+		}
+	}
+
+	pub fn is_type_geometry(&self, types: &[String]) -> bool {
+		match self {
+			Value::Geometry(Geometry::Point(_)) => {
+				types.iter().any(|t| &t[..] == "feature" || &t[..] == "point")
+			}
+			Value::Geometry(Geometry::Line(_)) => {
+				types.iter().any(|t| &t[..] == "feature" || &t[..] == "line")
+			}
+			Value::Geometry(Geometry::Polygon(_)) => {
+				types.iter().any(|t| &t[..] == "feature" || &t[..] == "polygon")
+			}
+			Value::Geometry(Geometry::MultiPoint(_)) => {
+				types.iter().any(|t| &t[..] == "feature" || &t[..] == "multipoint")
+			}
+			Value::Geometry(Geometry::MultiLine(_)) => {
+				types.iter().any(|t| &t[..] == "feature" || &t[..] == "multiline")
+			}
+			Value::Geometry(Geometry::MultiPolygon(_)) => {
+				types.iter().any(|t| &t[..] == "feature" || &t[..] == "multipolygon")
+			}
+			Value::Geometry(Geometry::Collection(_)) => {
+				types.iter().any(|t| &t[..] == "feature" || &t[..] == "collection")
+			}
+			_ => false,
+		}
+	}
+
 	// -----------------------------------
 	// Simple conversion of value
 	// -----------------------------------
@@ -622,6 +662,42 @@ impl Value {
 
 	pub fn to_vec(&self) -> Result<Vec<u8>, Error> {
 		msgpack::to_vec(&self).map_err(|e| e.into())
+	}
+
+	// -----------------------------------
+	// Simple conversion of value
+	// -----------------------------------
+
+	pub fn make_bool(self) -> Value {
+		self.is_truthy().into()
+	}
+
+	pub fn make_int(self) -> Value {
+		self.as_int().into()
+	}
+
+	pub fn make_float(self) -> Value {
+		self.as_float().into()
+	}
+
+	pub fn make_decimal(self) -> Value {
+		self.as_decimal().into()
+	}
+
+	pub fn make_number(self) -> Value {
+		self.as_number().into()
+	}
+
+	pub fn make_strand(self) -> Value {
+		self.as_strand().into()
+	}
+
+	pub fn make_datetime(self) -> Value {
+		self.as_datetime().into()
+	}
+
+	pub fn make_duration(self) -> Value {
+		self.as_duration().into()
 	}
 
 	// -----------------------------------
@@ -867,8 +943,8 @@ impl Serialize for Value {
 				Value::None => s.serialize_unit_variant("Value", 0, "None"),
 				Value::Void => s.serialize_unit_variant("Value", 1, "Void"),
 				Value::Null => s.serialize_unit_variant("Value", 2, "Null"),
-				Value::True => s.serialize_unit_variant("Value", 3, "True"),
-				Value::False => s.serialize_unit_variant("Value", 4, "False"),
+				Value::False => s.serialize_unit_variant("Value", 3, "False"),
+				Value::True => s.serialize_unit_variant("Value", 4, "True"),
 				Value::Number(v) => s.serialize_newtype_variant("Value", 5, "Number", v),
 				Value::Strand(v) => s.serialize_newtype_variant("Value", 6, "Strand", v),
 				Value::Duration(v) => s.serialize_newtype_variant("Value", 7, "Duration", v),
